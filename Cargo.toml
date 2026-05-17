@@ -71,7 +71,7 @@ humantime-serde = { version = "1" }
 # ─── auth / crypto ───────────────────────────────────────────────────────────
 getrandom = { version = "0.3" }
 hmac = { version = "0.12" }
-sha2 = { version = "0.10" }
+sha2 = { version = "0.11" }
 subtle = { version = "2" }
 zeroize = { version = "1" }
 # JWS compact serialization and EdDSA / ES256 signing primitives.
