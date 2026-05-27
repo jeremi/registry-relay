@@ -1728,7 +1728,7 @@
         "description": "Aggregate result with disclosure-control applied to groups.",
         "additionalProperties": true,
         "properties": {
-          "rows": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+          "data": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
         }
       },
       "MetadataLanding": {
