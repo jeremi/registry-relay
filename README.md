@@ -1,5 +1,7 @@
 # Registry Relay
 
+> **Experimental:** This codebase is under active development. Its APIs are evolving quickly and may be unstable.
+
 Registry Relay is a config-driven Rust service that turns sensitive government tabular files and selected database tables into protected, read-only, domain-oriented APIs.
 
 V1 is built around two layers:
