@@ -74,7 +74,16 @@ where
             _ = &mut shutdown => {
                 break;
             }
-            accepted = listener.accept() => accepted?,
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        warn!(error = %error, bind = %local_addr, "failed to accept http connection");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                }
+            }
         };
         let app = app.clone();
         let close_rx = shutdown_rx.clone();
@@ -127,6 +136,7 @@ async fn serve_connection(
     let io = TokioIo::new(stream);
     let conn = builder.serve_connection_with_upgrades(io, service);
     tokio::pin!(conn);
+    let mut shutdown_initiated = false;
 
     loop {
         tokio::select! {
@@ -136,8 +146,9 @@ async fn serve_connection(
                 }
                 break;
             }
-            _ = close_rx.changed() => {
+            _ = close_rx.changed(), if !shutdown_initiated => {
                 conn.as_mut().graceful_shutdown();
+                shutdown_initiated = true;
             }
         }
     }

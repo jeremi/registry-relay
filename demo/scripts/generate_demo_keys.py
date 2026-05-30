@@ -179,13 +179,16 @@ def write_secret_file(path: Path, contents: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = -1
             handle.write(contents)
     finally:
         if fd != -1:
             os.close(fd)
-    os.chmod(path, 0o600)
+    if not hasattr(os, "fchmod"):
+        os.chmod(path, 0o600)
 
 
 def main() -> int:
