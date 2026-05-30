@@ -104,20 +104,16 @@ impl OidcAuth {
             .map(|t| t.to_ascii_lowercase())
             .collect();
         let verifier = TokenVerifier::new(
-            TokenVerifierConfig {
-                issuer: config.issuer.clone(),
-                audiences: config.audience.clone(),
-                allowed_algorithms: algorithms.clone(),
-                // Relay preserves its historical behavior where an absent
-                // `typ` is accepted when `JWT` is configured. We enforce token
-                // types before delegating to the platform verifier.
-                allowed_typ: Vec::new(),
-                scope_claim: config.scope_claim.clone(),
-                scope_separator: ' ',
-                scope_map: None,
-                allowed_clients: config.allowed_clients.clone(),
-                leeway: config.leeway,
-            },
+            TokenVerifierConfig::registry_relay_access_profile(
+                config.issuer.clone(),
+                config.audience.clone(),
+                algorithms.clone(),
+                config.token_types.clone(),
+            )
+            .with_related_token_typ(config.token_types.clone(), config.token_types.clone())
+            .with_scope_claim(config.scope_claim.clone())
+            .with_allowed_clients(config.allowed_clients.clone())
+            .with_leeway(config.leeway),
             cache.platform_fetcher(),
         );
         Self {
@@ -159,15 +155,11 @@ impl OidcAuth {
                 }
             }
             None => {
-                // Absent `typ` is conventionally JWT. Honour it only if
-                // the configured allowlist contains JWT.
-                if !self.token_types.contains("jwt") {
-                    tracing::debug!(
-                        target: "registry_relay::auth",
-                        "oidc: token missing typ and JWT not allowed",
-                    );
-                    return Err(AuthError::MalformedCredential);
-                }
+                tracing::debug!(
+                    target: "registry_relay::auth",
+                    "oidc: token missing typ",
+                );
+                return Err(AuthError::MalformedCredential);
             }
         }
 
@@ -845,7 +837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_typ_is_accepted_when_jwt_in_allowlist() {
+    async fn missing_typ_is_rejected_even_when_jwt_in_allowlist() {
         let (sk, vk) = fresh_keypair();
         let token = mint(
             &sk,
@@ -855,7 +847,8 @@ mod tests {
             },
         );
         let provider = provider_from(base_config(), jwks_for(TEST_KID, &vk));
-        provider.verify(&token).await.expect("missing typ accepted");
+        let err = provider.verify(&token).await.expect_err("missing typ");
+        assert!(matches!(err, AuthError::MalformedCredential));
     }
 
     #[tokio::test]

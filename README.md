@@ -414,3 +414,20 @@ Reported numbers should state the machine, profile, fixture size, VU count, dura
 ## Operations
 
 See [docs/ops.md](docs/ops.md) for deploy, configuration, key rotation, audit handling, dataset reload, and troubleshooting guidance.
+
+## Platform Compatibility
+
+Relay consumes `registry-platform` from a sibling checkout during local commons
+release work. Run the compatibility gate before merging Platform-facing
+changes:
+
+```sh
+REGISTRY_PLATFORM_SOURCE_DIR=../registry-platform scripts/check-platform-compat.sh
+```
+
+The command checks the all-feature build plus the focused OIDC and audit tests
+that exercise the shared Platform security APIs. When
+`REGISTRY_PLATFORM_SOURCE_DIR` is not the sibling path encoded in Cargo, the
+script builds in a temporary sibling-layout copy so Cargo resolves the same
+Platform checkout the script validated. Set `CEL_MAPPING_SOURCE_DIR` as well
+when the Crosswalk checkout is not available at `../cel-mapping`.
