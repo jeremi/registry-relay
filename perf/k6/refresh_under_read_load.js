@@ -22,7 +22,7 @@
 // Override via REGISTRY_RELAY_TABLE_ID.
 
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
 import {
   commonOptions,
   baseUrl,
@@ -95,10 +95,9 @@ export default function (ctx) {
   });
   trackResponse(res);
 
-  // Reload trigger: one VU per interval fires the admin reload. Because all
-  // VUs share the same outer loop, the first one past the interval boundary
-  // fires it. This is approximate but sufficient for soak-style testing.
-  if (adminToken && (now - lastReloadAt) >= reloadIntervalSec) {
+  // Reload trigger: k6 gives each VU its own JS isolate, so keep reloads
+  // on VU 1 to avoid every VU firing independently.
+  if (__VU === 1 && adminToken && (now - lastReloadAt) >= reloadIntervalSec) {
     lastReloadAt = now;
     const reloadRes = http.post(
       `${base}/admin/v1/datasets/${ds}/tables/${tableId}/reload`,
