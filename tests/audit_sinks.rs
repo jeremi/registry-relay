@@ -56,7 +56,7 @@ async fn file_sink_writes_jsonl_and_creates_parent_dir() {
     let path = dir.path().join("nested").join("audit.jsonl");
     let sink = AuditPipeline::from_sink(FileSink::new(&path, 100, 14).expect("sink"));
 
-    sink.write_record(sample_record("/datasets"))
+    sink.write_record(sample_record("/v1/datasets"))
         .await
         .expect("write");
     sink.flush().await.expect("flush");
@@ -75,7 +75,7 @@ async fn file_sink_writes_jsonl_and_creates_parent_dir() {
         value["record_hash"].as_str().expect("record_hash").len(),
         64
     );
-    assert_eq!(value["record"]["path"], "/datasets");
+    assert_eq!(value["record"]["path"], "/v1/datasets");
     assert_eq!(value["record"]["endpoint_kind"], "catalog");
 }
 

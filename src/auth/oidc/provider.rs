@@ -6,8 +6,8 @@
 //! 1. Read `Authorization: Bearer <jwt>`. OIDC does not accept the
 //!    `X-Api-Key` header; that header is the API-key provider's legacy
 //!    surface only.
-//! 2. Decode the JOSE header. Reject tokens whose `typ` is not in the
-//!    configured allowlist (defaults to `JWT` / `at+jwt`), whose `alg`
+//! 2. Decode the JOSE header. Reject tokens whose `typ` is missing or not in
+//!    the configured allowlist (defaults to `JWT` / `at+jwt`), whose `alg`
 //!    is not in the configured allowlist (defaults to RS256/ES256/EdDSA;
 //!    HS\* and `none` are intentionally excluded), or that have no
 //!    `kid`.
