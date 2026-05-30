@@ -283,7 +283,7 @@ cd ../publicschema.com
 docker compose -f compose/dev.compose.yaml up -d zitadel zitadel-init
 
 # 2. Mint a test access token.
-cd ../registry_relay
+cd ../registry-relay
 TOKEN="$(./scripts/mint-zitadel-token.sh)"
 
 # 3. Run the relay against the OIDC example.
