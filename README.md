@@ -314,16 +314,17 @@ just validate-catalog-semic-local catalog=target/metadata.bregdcat-ap.jsonld pro
 
 ## Container Image
 
-The image build uses the shared `registry-platform` crates through the same
-path dependency layout as local Cargo builds. Keep a `registry-platform`
-checkout next to this repository, or set `REGISTRY_PLATFORM_DIR` when using the
-helper script.
+The image build uses the shared `registry-platform` and `cel-mapping` crates
+through the same path dependency layout as local Cargo builds. Keep those
+checkouts next to this repository, or set `REGISTRY_PLATFORM_DIR` and
+`CEL_MAPPING_DIR` when using the helper script.
 
 Build the production image with Docker:
 
 ```sh
 docker buildx build --load \
   --build-context registry-platform=../registry-platform \
+  --build-context cel-mapping=../cel-mapping \
   -t registry-relay:local \
   .
 ```
