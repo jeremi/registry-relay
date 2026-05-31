@@ -812,7 +812,7 @@ async fn middleware_primary_key_hash_uses_hmac_when_secret_configured() {
     );
 
     // Cross-check the exact value against the keyed helper to pin the
-    // construction (HMAC-SHA256(secret, field || \0 || id)).
+    // platform field-bound sensitive-value construction.
     assert_eq!(
         parsed_a["primary_key"],
         sensitive_value_hash_keyed(
