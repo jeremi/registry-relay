@@ -20,7 +20,7 @@ use axum::Router;
 use registry_relay::audit::{
     audit_layer, redact_query, sensitive_value_hash, sensitive_value_hash_keyed, AuditContextExt,
     AuditHashSecret, AuditKeyHasher, AuditOutcome, AuditPipeline, AuditRecord, AuditSettings,
-    EndpointKind, ErrorCodeExt, InMemorySink, StdoutSink,
+    EndpointKind, ErrorCodeExt, InMemorySink, OperationalAuditEvent, StdoutSink,
 };
 use registry_relay::auth::{AuthMode, Principal, ScopeSet};
 use serde_json::Value;
@@ -210,6 +210,20 @@ fn record_serialization_rejects_plaintext_table_id() {
         error.to_string().contains("table_id must be pre-hashed"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn operational_event_rejects_plaintext_table_hash_in_debug() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        let _ = OperationalAuditEvent::new("ingest.failed", "ingest.source_unreadable")
+            .with_table_id_hash("individuals_table".to_string());
+    });
+
+    assert!(result.is_err(), "plaintext table ids must be caught early");
 }
 
 #[test]

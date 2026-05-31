@@ -331,8 +331,18 @@ impl OperationalAuditEvent {
         self
     }
 
+    /// Sets a precomputed audit hash for the backing table identifier.
+    ///
+    /// `table_id_hash` must already use the `sha256:` or `hmac-sha256:`
+    /// audit-hash format. Request handlers that have a plaintext table id
+    /// should set [`AuditContextExt::table_id`] instead and let the audit
+    /// middleware hash it with the configured audit hasher.
     #[must_use]
     pub fn with_table_id_hash(mut self, table_id_hash: String) -> Self {
+        debug_assert!(
+            is_audit_hash(&table_id_hash),
+            "with_table_id_hash expects a precomputed audit hash"
+        );
         self.table_id_hash = Some(table_id_hash);
         self
     }
