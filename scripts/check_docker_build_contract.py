@@ -8,10 +8,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_CONTENT_CACHE: dict[Path, str] = {}
 
 
 def require(path: Path, needle: str, detail: str) -> list[str]:
-    text = path.read_text(encoding="utf-8")
+    if path not in _CONTENT_CACHE:
+        _CONTENT_CACHE[path] = path.read_text(encoding="utf-8")
+    text = _CONTENT_CACHE[path]
     if needle in text:
         return []
     return [f"{path.relative_to(ROOT)}: missing {detail}: {needle!r}"]
