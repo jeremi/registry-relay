@@ -207,6 +207,30 @@ class AdvisoryBaselineCheckTest(unittest.TestCase):
             1,
         )
 
+    def test_grype_unknown_severity_is_below_initial_threshold(self):
+        self.write_baseline()
+        baseline = self.module.load_baseline(self.baseline_path)
+        report = {
+            "matches": [{
+                "vulnerability": {"id": "CVE-2026-0002", "severity": "Unknown"},
+                "artifact": {
+                    "name": "openssl",
+                    "version": "3.0.0",
+                    "type": "deb",
+                },
+            }]
+        }
+        findings = self.module.normalize_grype(report, "registry-relay-image")
+        self.assertEqual(
+            self.module.check_findings(
+                "grype",
+                findings,
+                baseline,
+                self.module.parse_date("2026-06-02", "today"),
+            ),
+            0,
+        )
+
     def test_malformed_review_entry_fails_baseline_load(self):
         self.baseline_path.write_text(json.dumps({
             "version": 1,

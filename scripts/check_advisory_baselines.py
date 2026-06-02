@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE = ROOT / "security" / "advisory-baseline.json"
 
 SEVERITY_ORDER = {
+    "unknown": 0,
     "informational": 0,
     "negligible": 0,
     "low": 1,
