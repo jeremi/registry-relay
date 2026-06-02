@@ -18,6 +18,7 @@ DEFAULT_BASELINE = ROOT / "security" / "advisory-baseline.json"
 
 SEVERITY_ORDER = {
     "unknown": 0,
+    "undefined": 0,
     "informational": 0,
     "negligible": 0,
     "low": 1,
@@ -98,8 +99,11 @@ def normalize_path(value: str | None) -> str:
 def route_key(route: Any) -> str:
     if not isinstance(route, dict):
         return ""
+    route_list = route.get("route")
+    if not isinstance(route_list, list):
+        return ""
     parts = []
-    for entry in route.get("route", []):
+    for entry in route_list:
         if isinstance(entry, dict) and "Key" in entry:
             parts.append(f"k:{entry['Key']}")
         elif isinstance(entry, dict) and "Index" in entry:
@@ -126,7 +130,9 @@ def normalize_zizmor(report: Any) -> list[Finding]:
     for item in report:
         if not isinstance(item, dict) or item.get("ignored"):
             continue
-        determinations = item.get("determinations", {})
+        determinations = item.get("determinations")
+        if not isinstance(determinations, dict):
+            determinations = {}
         severity = str(determinations.get("severity", "informational")).lower()
         ident = str(item.get("ident", "<unknown>"))
         location = primary_location(item.get("locations"))
@@ -239,8 +245,9 @@ def validate_review_entry(review: Any) -> None:
     for field in ("reviewed_at", "expires_at"):
         parse_date(str(review[field]), field)
     for field in ("fingerprint", "owner", "reason"):
-        if not str(review[field]).strip():
-            fail(f"reviewed finding {field} must not be blank")
+        value = review.get(field)
+        if not isinstance(value, str) or not value.strip():
+            fail(f"reviewed finding {field} must be a non-blank string")
 
 
 def parse_date(value: str, field: str) -> dt.date:
@@ -266,6 +273,7 @@ def check_findings(
     threshold = policy_threshold(baseline, tool)
     threshold_rank = severity_rank(threshold)
     blocking = [f for f in findings if severity_rank(f.severity) >= threshold_rank]
+    active_fingerprints = {finding.fingerprint for finding in blocking}
     reviews = {
         str(review["fingerprint"]): review
         for review in baseline["reviewed_findings"]
@@ -274,7 +282,8 @@ def check_findings(
     expired = [
         review
         for review in reviews.values()
-        if parse_date(str(review["expires_at"]), "expires_at") < today
+        if review["fingerprint"] in active_fingerprints
+        and parse_date(str(review["expires_at"]), "expires_at") < today
     ]
     if expired:
         for review in expired:
@@ -296,7 +305,6 @@ def check_findings(
             )
         return 1
 
-    active_fingerprints = {finding.fingerprint for finding in blocking}
     stale = sorted(set(reviews) - active_fingerprints)
     print(
         "advisory baseline: "

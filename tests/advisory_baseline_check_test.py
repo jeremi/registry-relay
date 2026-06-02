@@ -127,6 +127,21 @@ class AdvisoryBaselineCheckTest(unittest.TestCase):
             1,
         )
 
+    def test_expired_stale_review_does_not_block(self):
+        stale_finding = self.module.normalize_zizmor(self.zizmor_report())[0]
+        active_finding = self.module.normalize_zizmor(self.zizmor_report(severity="Medium"))[0]
+        self.write_baseline([self.review(stale_finding, expires_at="2026-06-01")])
+        baseline = self.module.load_baseline(self.baseline_path)
+        self.assertEqual(
+            self.module.check_findings(
+                "zizmor",
+                [active_finding],
+                baseline,
+                self.module.parse_date("2026-06-02", "today"),
+            ),
+            0,
+        )
+
     def test_zizmor_medium_is_below_initial_threshold(self):
         self.write_baseline()
         baseline = self.module.load_baseline(self.baseline_path)
@@ -183,6 +198,29 @@ class AdvisoryBaselineCheckTest(unittest.TestCase):
         self.assertIn("i:1", findings[0].fingerprint)
         self.assertIn("i:2", findings[1].fingerprint)
 
+    def test_zizmor_null_determinations_defaults_to_informational(self):
+        self.write_baseline()
+        baseline = self.module.load_baseline(self.baseline_path)
+        report = self.zizmor_report()
+        report[0]["determinations"] = None
+        findings = self.module.normalize_zizmor(report)
+        self.assertEqual(findings[0].severity, "informational")
+        self.assertEqual(
+            self.module.check_findings(
+                "zizmor",
+                findings,
+                baseline,
+                self.module.parse_date("2026-06-02", "today"),
+            ),
+            0,
+        )
+
+    def test_zizmor_null_route_does_not_crash(self):
+        report = self.zizmor_report()
+        report[0]["locations"][0]["symbolic"]["route"] = {"route": None}
+        finding = self.module.normalize_zizmor(report)[0]
+        self.assertIn("zizmor|unpinned-uses|.github/workflows/ci.yml||", finding.fingerprint)
+
     def test_grype_critical_requires_review(self):
         self.write_baseline()
         baseline = self.module.load_baseline(self.baseline_path)
@@ -231,6 +269,30 @@ class AdvisoryBaselineCheckTest(unittest.TestCase):
             0,
         )
 
+    def test_grype_undefined_severity_is_below_initial_threshold(self):
+        self.write_baseline()
+        baseline = self.module.load_baseline(self.baseline_path)
+        report = {
+            "matches": [{
+                "vulnerability": {"id": "CVE-2026-0003", "severity": "Undefined"},
+                "artifact": {
+                    "name": "openssl",
+                    "version": "3.0.0",
+                    "type": "deb",
+                },
+            }]
+        }
+        findings = self.module.normalize_grype(report, "registry-relay-image")
+        self.assertEqual(
+            self.module.check_findings(
+                "grype",
+                findings,
+                baseline,
+                self.module.parse_date("2026-06-02", "today"),
+            ),
+            0,
+        )
+
     def test_malformed_review_entry_fails_baseline_load(self):
         self.baseline_path.write_text(json.dumps({
             "version": 1,
@@ -252,6 +314,18 @@ class AdvisoryBaselineCheckTest(unittest.TestCase):
         self.write_baseline([review, dict(review)])
         with self.assertRaises(SystemExit):
             self.module.load_baseline(self.baseline_path)
+
+    def test_review_string_fields_must_be_non_blank_strings(self):
+        finding = self.module.normalize_zizmor(self.zizmor_report())[0]
+        for field, value in (
+            ("fingerprint", None),
+            ("owner", ""),
+            ("reason", "   "),
+        ):
+            with self.subTest(field=field):
+                self.write_baseline([self.review(finding, **{field: value})])
+                with self.assertRaises(SystemExit):
+                    self.module.load_baseline(self.baseline_path)
 
 
 if __name__ == "__main__":

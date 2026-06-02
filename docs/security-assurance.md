@@ -17,8 +17,9 @@ initial blocking gates are:
 
 Every reviewed entry must include a fingerprint, owner, reason, review date,
 and expiration date. New unreviewed findings at or above the threshold fail CI.
-Expired reviewed entries also fail CI. Stale reviewed entries are reported so
-the baseline can shrink after the underlying issue is fixed.
+Expired reviewed entries fail CI while the finding is still active. Stale
+reviewed entries are reported so the baseline can shrink after the underlying
+issue is fixed.
 
 The unauthenticated endpoint allowlist lives in
 `security/auth-none-allowlist.yml`. Additions require maintainer review through
