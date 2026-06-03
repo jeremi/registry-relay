@@ -171,9 +171,9 @@ decision_artifact="$(find "${output_dir}" -maxdepth 1 -name '*household-benefit-
 check "household decision has no Relay write-back" json_path_equals "${decision_artifact}" boundary.relay_write_back false
 
 log_file="/tmp/decentralized-smoke-service-logs.txt"
-docker compose -f "${compose_file}" logs --no-color civil-registry-relay social-protection-registry-relay health-registry-relay civil-evidence-server social-protection-evidence-server shared-eligibility-evidence-server > "${log_file}"
+docker compose -f "${compose_file}" logs --no-color civil-registry-relay social-protection-registry-relay health-registry-relay civil-registry-notary social-protection-registry-notary shared-eligibility-registry-notary > "${log_file}"
 grep '"error_code":"auth.scope_denied"' "${log_file}" >/dev/null || fail "Relay denied audit event"
-grep '"decision":"evaluate"' "${log_file}" >/dev/null || fail "Evidence Server evaluation audit event"
+grep '"decision":"evaluate"' "${log_file}" >/dev/null || fail "Registry Notary evaluation audit event"
 grep '"status_code":200' "${log_file}" >/dev/null || fail "Relay positive audit event"
 
 echo "smoke OK"

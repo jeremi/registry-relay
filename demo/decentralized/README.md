@@ -11,14 +11,14 @@ OpenIMIS, MOSIP, or other product integrations.
 - `civil-registry-relay`: CSV-backed civil registry authority on host port `4311`.
 - `social-protection-registry-relay`: XLSX-backed social protection authority on host port `4312`.
 - `health-registry-relay`: Parquet-backed health authority on host port `4313`.
-- `civil-evidence-server`: civil Registry Notary verifier on host port `4321`.
-- `social-protection-evidence-server`: social protection Registry Notary verifier on host port `4322`.
-- `shared-eligibility-evidence-server`: cross-authority civil, social, and health Registry Notary verifier on host port `4323`.
+- `civil-registry-notary`: civil Registry Notary verifier on host port `4321`.
+- `social-protection-registry-notary`: social protection Registry Notary verifier on host port `4322`.
+- `shared-eligibility-registry-notary`: cross-authority civil, social, and health Registry Notary verifier on host port `4323`.
 - `static-metadata-publisher`: generated static metadata on host port `4331`.
 
 Inside Compose, services use DNS names like
 `http://civil-registry-relay:8080` and
-`http://shared-eligibility-evidence-server:8080`. Registry Notary containers do
+`http://shared-eligibility-registry-notary:8080`. Registry Notary containers do
 not mount source data. They read registry facts over HTTP from Relay. The demo
 client also has no `data/` mount.
 
