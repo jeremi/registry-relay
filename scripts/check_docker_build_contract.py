@@ -80,8 +80,15 @@ def main() -> int:
     failures.extend(
         require(
             container_workflow,
-            f"REGISTRY_RELAY_RELEASE_FEATURES: {release_features}",
-            "official image release feature set",
+            "REGISTRY_RELAY_RELEASE_FEATURES",
+            "official image release feature variable",
+        )
+    )
+    failures.extend(
+        require(
+            container_workflow,
+            release_features,
+            "official image release feature list",
         )
     )
     failures.extend(
@@ -101,8 +108,15 @@ def main() -> int:
     failures.extend(
         require(
             ci_workflow,
-            f"REGISTRY_RELAY_FEATURES={release_features}",
-            "CI container build release feature set",
+            "REGISTRY_RELAY_FEATURES",
+            "CI container build release feature variable",
+        )
+    )
+    failures.extend(
+        require(
+            ci_workflow,
+            release_features,
+            "CI container build release feature list",
         )
     )
 
