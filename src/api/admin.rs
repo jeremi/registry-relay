@@ -332,7 +332,11 @@ fn config_hash(config: &Config) -> String {
         "provenance": provenance_summary(config),
     });
     let bytes = serde_json::to_vec(&public_shape).expect("public config shape serializes");
-    format!("sha256:{}", hex_lower(&Sha256::digest(bytes)))
+    let hex = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
 }
 
 fn readiness_label(readiness: Option<&ReadinessSnapshot>) -> &'static str {
@@ -364,16 +368,6 @@ fn feature_status(enabled: bool) -> &'static str {
     } else {
         "disabled"
     }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 fn publish_readiness(
