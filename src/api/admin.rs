@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use registry_manifest_core::CompiledMetadata;
+use registry_platform_ops::{filter_posture_for_tier, PostureTier};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -171,7 +172,7 @@ fn build_posture(
         "public_base_url".to_string(),
         json!(config.catalog.base_url),
     );
-    json!({
+    let posture = json!({
         "schema": "registry.ops.posture.v1",
         "observed_at": OffsetDateTime::now_utc()
             .format(&Rfc3339)
@@ -221,7 +222,9 @@ fn build_posture(
             "findings": [],
             "audit": audit_summary(config),
         },
-    })
+    });
+    filter_posture_for_tier(posture, PostureTier::Default)
+        .expect("default posture allowlist is a valid platform contract")
 }
 
 fn posture_warnings(config: &Config, readiness: Option<&ReadinessSnapshot>) -> Vec<String> {
