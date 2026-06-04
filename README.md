@@ -340,16 +340,20 @@ or with the helper:
 scripts/build-image.sh registry-relay:local
 ```
 
-The default image is built with no optional Cargo features. For a lab image
-that needs standards adapters, pass feature flags explicitly:
+The base image is built with no optional Cargo features. For a standards-enabled
+release or lab image, pass feature flags explicitly:
 
 ```sh
 REGISTRY_RELAY_FEATURES=spdci-api-standards,standards-cel-mapping,ogcapi-edr \
-  scripts/build-image.sh registry-relay:lab
+  scripts/build-image.sh registry-relay:standards
 ```
 
 The equivalent direct Docker build argument is
 `--build-arg REGISTRY_RELAY_FEATURES=spdci-api-standards,standards-cel-mapping,ogcapi-edr`.
+
+When the release story claims SP DCI, standards CEL mapping, or OGC EDR support,
+the release evidence must identify the standards-enabled image tag or digest,
+not only the no-optional-features base image.
 
 The product repository publishes CI images to `ghcr.io/jeremi/registry-relay`,
 tagged as `main` and `sha-<commit>`. First serious release readiness is checked

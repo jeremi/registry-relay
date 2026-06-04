@@ -116,9 +116,9 @@ check "civil relay OpenAPI" curl_json GET http://127.0.0.1:4311/openapi.json "${
 check "social relay OpenAPI" curl_json GET http://127.0.0.1:4312/openapi.json "${SOCIAL_METADATA_CLIENT_RAW}" "${output_dir}/smoke-social-openapi.json"
 check "health relay OpenAPI" curl_json GET http://127.0.0.1:4313/openapi.json "${HEALTH_METADATA_CLIENT_RAW}" "${output_dir}/smoke-health-openapi.json"
 
-check "civil Evidence Server OpenAPI" curl_json GET http://127.0.0.1:4321/openapi.json "${CIVIL_EVIDENCE_CLIENT_BEARER}" "${output_dir}/smoke-civil-evidence-openapi.json"
-check "social Evidence Server OpenAPI" curl_json GET http://127.0.0.1:4322/openapi.json "${SOCIAL_EVIDENCE_CLIENT_BEARER}" "${output_dir}/smoke-social-evidence-openapi.json"
-check "shared Evidence Server OpenAPI" curl_json GET http://127.0.0.1:4323/openapi.json "${SHARED_EVIDENCE_CLIENT_BEARER}" "${output_dir}/smoke-shared-evidence-openapi.json"
+check "civil Registry Notary OpenAPI" curl_json GET http://127.0.0.1:4321/openapi.json "${CIVIL_EVIDENCE_CLIENT_BEARER}" "${output_dir}/smoke-civil-evidence-openapi.json"
+check "social Registry Notary OpenAPI" curl_json GET http://127.0.0.1:4322/openapi.json "${SOCIAL_EVIDENCE_CLIENT_BEARER}" "${output_dir}/smoke-social-evidence-openapi.json"
+check "shared Registry Notary OpenAPI" curl_json GET http://127.0.0.1:4323/openapi.json "${SHARED_EVIDENCE_CLIENT_BEARER}" "${output_dir}/smoke-shared-evidence-openapi.json"
 
 check "civil relay evidence offerings" curl_json GET http://127.0.0.1:4311/metadata/evidence-offerings "${CIVIL_METADATA_CLIENT_RAW}" "${output_dir}/smoke-civil-offerings.json"
 check "social relay evidence offerings" curl_json GET http://127.0.0.1:4312/metadata/evidence-offerings "${SOCIAL_METADATA_CLIENT_RAW}" "${output_dir}/smoke-social-offerings.json"
