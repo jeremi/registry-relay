@@ -1,14 +1,14 @@
 # Security Assurance
 
 Registry Relay's container workflow publishes stable images only from
-`vX.Y.Z` tags under `ghcr.io/jeremi/registry-relay`. Release tags also update
+`vX.Y.Z` tags to `ghcr.io/jeremi/registry-relay`. Release tags also update
 `vX.Y`, `vX`, and `latest`; `latest` means latest stable release. Pull requests
 and `main` pushes build a local validation image for smoke, SBOM, and Grype
 evidence, but do not push a GHCR tag. Nightly or manual development snapshots
 publish `snapshot`, `snapshot-YYYYMMDD`, and `snapshot-<shortsha>` only when
 the existing `snapshot` image's `org.opencontainers.image.revision` label does
-not already match current `main`. Final deployments should pin the selected
-image by digest.
+not already match the current `main` revision. Final deployments should pin the
+selected image by digest.
 
 Security waivers live in `security/waivers.yml` when needed. Each waiver must
 name an owner, rationale, review trigger, and expiration. The default owner is
@@ -53,8 +53,9 @@ losing security scheme or route semantics.
 ## Image signing status
 
 Registry Relay release images are not signed with `cosign` or another image
-signature workflow yet. The current release evidence relies on stable release
-tags, digest pinning, SBOM generation, and Grype image vulnerability reports.
+signature workflow yet. The current release evidence relies on immutable
+`vX.Y.Z` tags, digest pinning, SBOM generation, and Grype image vulnerability
+reports.
 Operators should pin the selected image by digest and treat image-signature
 verification as not available for this release.
 

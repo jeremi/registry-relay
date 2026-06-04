@@ -362,8 +362,8 @@ The container workflow still builds images on pull requests and `main` pushes
 for validation, but does not push those validation images. Nightly or manual
 development snapshots may publish `snapshot`, `snapshot-YYYYMMDD`, and
 `snapshot-<shortsha>` only when the existing snapshot does not already point at
-the current `main` revision. Downstream deployments should consume stable
-release tags or immutable digests for rollback guarantees.
+the current `main` revision. Downstream deployments should consume specific
+version tags, such as `vX.Y.Z`, or immutable digests for rollback guarantees.
 
 The production image:
 
