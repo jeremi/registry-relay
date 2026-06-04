@@ -41,7 +41,10 @@ def require_runtime(path: Path, needle: str, detail: str) -> list[str]:
 
 def forbid_runtime(path: Path, needle: str, detail: str) -> list[str]:
     stage = runtime_stage(path)
-    if needle not in stage:
+    stage_without_comments = "\n".join(
+        line for line in stage.splitlines() if not line.strip().startswith("#")
+    )
+    if needle not in stage_without_comments:
         return []
     return [f"{path.relative_to(ROOT)} runtime stage: forbidden {detail}: {needle!r}"]
 
