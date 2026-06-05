@@ -2028,6 +2028,93 @@ async fn config_apply_signed_tuf_target_swaps_runtime_snapshot() {
 }
 
 #[tokio::test]
+async fn config_apply_signed_tuf_stale_sequence_rejects_without_swapping() {
+    let fixture = build_fixture();
+    let first_candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace("owner: Test Ministry", "owner: Signed Operations Ministry");
+    let first_signed = write_signed_config_tuf_fixture(
+        &fixture,
+        &first_candidate,
+        5,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+    )
+    .await;
+
+    let first_response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        signed_tuf_apply_request(&first_signed),
+        ADMIN_KEY,
+    )
+    .await;
+
+    if first_response.status_code() != StatusCode::OK {
+        let body: Value = first_response.json();
+        panic!("first signed TUF apply should succeed, got {body:#}");
+    }
+
+    let first_hash = internal_config_hash(first_candidate.as_bytes());
+    let stale_candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace("owner: Test Ministry", "owner: Stale Operations Ministry");
+    let stale_signed = write_signed_config_tuf_fixture_with_previous_hash_and_change_classes(
+        &fixture,
+        &stale_candidate,
+        4,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+        &["public_metadata"],
+        &first_hash,
+    )
+    .await;
+
+    let stale_response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        signed_tuf_apply_request(&stale_signed),
+        ADMIN_KEY,
+    )
+    .await;
+
+    stale_response.assert_status(StatusCode::CONFLICT);
+    let body: Value = stale_response.json();
+    assert_eq!(body["bundle_id"], "test-bundle");
+    assert_eq!(body["sequence"], 4);
+    assert_eq!(body["result"], "rejected_rollback");
+    assert_eq!(body["posture_result"], "rejected");
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["restart_required"], false);
+
+    let posture = fixture
+        .server
+        .get("/admin/v1/posture")
+        .add_header("Authorization", format!("Bearer {OPS_KEY}"))
+        .await;
+    posture.assert_status(StatusCode::OK);
+    let posture: Value = posture.json();
+    assert_matches_posture_schema(&posture);
+    assert_eq!(posture["instance"]["owner"], "Signed Operations Ministry");
+    assert_eq!(posture["configuration"]["source"], "signed_bundle_file");
+    assert_eq!(posture["configuration"]["last_bundle_id"], "test-bundle");
+    assert_eq!(posture["configuration"]["last_bundle_sequence"], 5);
+    assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+    assert_eq!(posture["configuration"]["restart_required"], false);
+
+    let record = FileAntiRollbackStore::new(&fixture.antirollback_path)
+        .load(&AntiRollbackKey {
+            product: "registry-relay".to_string(),
+            instance_id: "relay-test-instance".to_string(),
+            environment: "lab".to_string(),
+            stream_id: "test-stream".to_string(),
+        })
+        .expect("antirollback state loads");
+    assert_eq!(record.last_sequence, 5);
+    assert_eq!(record.last_config_hash, first_hash);
+}
+
+#[tokio::test]
 async fn config_apply_remote_signed_tuf_target_swaps_runtime_snapshot() {
     let fixture = build_fixture();
     let candidate = std::fs::read_to_string(&fixture.config_path)
