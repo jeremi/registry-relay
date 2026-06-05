@@ -246,7 +246,7 @@ pub enum ConfigError {
     /// Gateway DID does not match the deployment host.
     #[error("provenance issuer did mismatch")]
     ProvenanceIssuerDidMismatch,
-    /// Signer kind is not one of `software` or `kms`.
+    /// Signer kind is not one of `software` or `file_watch`.
     #[error("provenance signer kind invalid")]
     ProvenanceSignerKindInvalid,
     /// Software signer's `jwk_env` is unset or empty.
