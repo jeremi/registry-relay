@@ -559,6 +559,7 @@ fn initialize_antirollback_state(config: &Config, provenance: &ConfigProvenance)
             last_config_hash: provenance.internal_config_hash.clone(),
             root_version: None,
             break_glass: Default::default(),
+            local_approvals: Default::default(),
         })
         .expect("antirollback state initializes");
 }

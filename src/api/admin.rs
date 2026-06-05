@@ -653,6 +653,8 @@ async fn config_apply(
             root_version: resolved.root_version,
             break_glass: break_glass.0,
             break_glass_rate_limit: break_glass.1,
+            local_approval: None,
+            local_approval_rate_limit: None,
         },
     ) {
         let result = if is_break_glass_error(&error) {
