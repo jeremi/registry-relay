@@ -27,8 +27,8 @@ use registry_relay::format::FormatRegistry;
 use registry_relay::ingest::{IngestRegistry, ReadinessSnapshot};
 use registry_relay::observability::RequestMetrics;
 use registry_relay::provenance::{
-    build_resolved_provenance_config, BuildStateError, ProvenanceState, ResolvedProvenanceConfig,
-    Signer, SignerError, SigningAlgorithm,
+    build_resolved_provenance_config, BuildStateError, ClaimType, IssuanceContext, ProvenanceState,
+    ResolvedProvenanceConfig, Signer, SignerError, SigningAlgorithm,
 };
 use registry_relay::query::{AggregateQueryEngine, EntityQueryEngine};
 use registry_relay::runtime_config::{CursorSigner, RelayRuntimeHandle, RelayRuntimeSnapshot};
@@ -2180,6 +2180,11 @@ async fn config_apply_signed_provenance_rotation_swaps_runtime_snapshot() {
         );
     std::fs::write(&config_path, yaml).expect("config writes");
     let fixture = build_fixture_from_config_path_with_provenance_state(tmp, config_path, true);
+    let inflight_snapshot = fixture.handle.load_full();
+    let inflight_provenance = inflight_snapshot
+        .provenance_state
+        .clone()
+        .expect("in-flight request holds old provenance state");
 
     let new_key_path = fixture._tmp.path().join("provenance-new.jwk");
     let new_kid = "did:web:data.example.test#relay-public-key-2";
@@ -2252,6 +2257,40 @@ async fn config_apply_signed_provenance_rotation_swaps_runtime_snapshot() {
         "ready"
     );
     assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+
+    let current_provenance = fixture
+        .handle
+        .load_full()
+        .provenance_state
+        .clone()
+        .expect("current runtime holds new provenance state");
+    let subject_uri =
+        "https://data.example.test/v1/datasets/social_registry/entities/beneficiary/records/1";
+    let issued_at = time::OffsetDateTime::now_utc();
+    let inflight_vc = inflight_provenance
+        .issue(IssuanceContext {
+            claim_type: ClaimType::EntityRecord,
+            subject_uri: subject_uri.to_string(),
+            credential_subject: json!({
+                "id": subject_uri,
+                "beneficiary_id": 1,
+            }),
+            issued_at,
+        })
+        .expect("in-flight request can finish with old signer");
+    let current_vc = current_provenance
+        .issue(IssuanceContext {
+            claim_type: ClaimType::EntityRecord,
+            subject_uri: subject_uri.to_string(),
+            credential_subject: json!({
+                "id": subject_uri,
+                "beneficiary_id": 1,
+            }),
+            issued_at,
+        })
+        .expect("new request signs with new signer");
+    assert_eq!(inflight_vc.verification_method_id, old_kid);
+    assert_eq!(current_vc.verification_method_id, new_kid);
 
     let did = fixture.public_server.get("/.well-known/did.json").await;
     did.assert_status(StatusCode::OK);
