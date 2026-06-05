@@ -32,7 +32,9 @@ use registry_relay::provenance::{
 };
 use registry_relay::query::{AggregateQueryEngine, EntityQueryEngine};
 use registry_relay::runtime_config::{CursorSigner, RelayRuntimeHandle, RelayRuntimeSnapshot};
-use registry_relay::server::{build_admin_app, build_app_with_entity_query};
+use registry_relay::server::{
+    build_admin_app, build_app_with_entity_query_metadata_provenance_and_metrics,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -531,16 +533,20 @@ fn build_fixture_from_config_path_with_provenance_state_and_admin_resolver(
         spdci_response_mapper: None,
         metrics: Arc::clone(&metrics),
     }));
-    let public_app = build_app_with_entity_query(
+    let public_app = build_app_with_entity_query_metadata_provenance_and_metrics(
         Arc::clone(&config),
         auth.clone(),
         Arc::clone(&sink),
         readiness_rx.clone(),
-        entity_registry,
-        entity_query,
-        aggregate_query,
+        Arc::clone(&entity_registry),
+        Arc::clone(&entity_query),
+        Arc::clone(&aggregate_query),
+        None,
+        handle.load_full().provenance_state.clone(),
+        Arc::clone(&metrics),
     )
-    .expect("public app builds");
+    .expect("public app builds")
+    .layer(axum::Extension(Arc::clone(&handle)));
     let mut app = build_admin_app(
         Arc::clone(&config),
         auth,
@@ -2218,7 +2224,7 @@ async fn config_apply_signed_provenance_rotation_swaps_runtime_snapshot() {
         )
         .replace(
             "signing_algorithm: EdDSA\n",
-            "signing_algorithm: EdDSA\n    retired_keys:\n      - verification_method_id: did:web:data.example.test#relay-public-key\n        jwk_env: REGISTRY_RELAY_RETIRED_PROVENANCE_JWK\n        retired_after: 2026-06-05T00:00:00Z\n",
+            "signing_algorithm: EdDSA\n    retired_keys:\n      - verification_method_id: did:web:data.example.test#relay-public-key\n        jwk_env: REGISTRY_RELAY_RETIRED_PROVENANCE_JWK\n        retired_after: 2099-06-05T00:00:00Z\n",
         );
     let signed = write_signed_config_tuf_fixture_with_change_classes(
         &fixture,
@@ -2268,6 +2274,26 @@ async fn config_apply_signed_provenance_rotation_swaps_runtime_snapshot() {
         "ready"
     );
     assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+
+    let did = fixture.public_server.get("/.well-known/did.json").await;
+    did.assert_status(StatusCode::OK);
+    let did: Value = did.json();
+    assert_eq!(did["assertionMethod"], json!([new_kid]));
+    let methods = did["verificationMethod"]
+        .as_array()
+        .expect("verificationMethod is an array");
+    let method_ids = methods
+        .iter()
+        .map(|method| method["id"].as_str().expect("method id").to_string())
+        .collect::<Vec<_>>();
+    assert!(method_ids.contains(&new_kid.to_string()));
+    assert!(method_ids.contains(&old_kid.to_string()));
+    for method in methods {
+        assert!(
+            method["publicKeyJwk"].get("d").is_none(),
+            "DID verification method must not expose private key material"
+        );
+    }
 }
 
 #[tokio::test]
