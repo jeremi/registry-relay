@@ -1703,6 +1703,46 @@ audit:
         );
     }
 
+    #[tokio::test]
+    async fn config_apply_bundle_posts_remote_admin_apply_request_with_bearer_token() {
+        let token_env = "REGISTRY_RELAY_TEST_REMOTE_APPLY_BUNDLE_TOKEN";
+        let token = "relay-admin-token";
+        std::env::set_var(token_env, token);
+        let (admin_url, received) = spawn_admin_apply_server(token, StatusCode::OK).await;
+        let command = ConfigApplyBundleCommand {
+            admin_url,
+            admin_token_env: token_env.to_string(),
+            root_path: "/srv/relay/tuf/1.root.json".into(),
+            datastore_dir: "/srv/relay/tuf/datastore".into(),
+            target_name: "registry-relay.yaml".to_string(),
+            source: ConfigVerifyBundleSource::Remote {
+                metadata_base_url: "https://config.example.test/metadata".to_string(),
+                targets_base_url: "https://config.example.test/targets".to_string(),
+                allow_dev_insecure_fetch_urls: true,
+            },
+            local_approval_reference: Some("ROOT-2026-Q2".to_string()),
+        };
+
+        run_config_apply_bundle(command)
+            .await
+            .expect("remote apply-bundle posts to admin apply endpoint");
+
+        assert_eq!(
+            received.lock().await.take(),
+            Some(json!({
+                "tuf": {
+                    "root_path": "/srv/relay/tuf/1.root.json",
+                    "metadata_base_url": "https://config.example.test/metadata",
+                    "targets_base_url": "https://config.example.test/targets",
+                    "datastore_dir": "/srv/relay/tuf/datastore",
+                    "target_name": "registry-relay.yaml",
+                    "allow_dev_insecure_fetch_urls": true,
+                },
+                "local_approval_reference": "ROOT-2026-Q2",
+            }))
+        );
+    }
+
     #[test]
     fn config_verify_bundle_cli_requires_target_name() {
         let err = parse_cli_command_from(command_args(&[
