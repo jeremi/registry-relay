@@ -2,6 +2,8 @@
 //! Tests for the local file-watch provenance signer.
 
 use std::fs;
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -54,6 +56,27 @@ fn sign_and_verify(signer: &dyn Signer, vk: VerifyingKey) {
         .expect("signature verifies");
 }
 
+fn file_mtime(path: &Path) -> SystemTime {
+    fs::metadata(path)
+        .expect("key metadata")
+        .modified()
+        .expect("key mtime")
+}
+
+fn set_file_mtime(path: &Path, mtime: SystemTime) {
+    fs::File::open(path)
+        .expect("open key file for mtime")
+        .set_modified(mtime)
+        .expect("set key mtime");
+}
+
+fn bump_file_mtime(path: &Path) {
+    let mtime = file_mtime(path)
+        .checked_add(Duration::from_secs(2))
+        .expect("mtime bump");
+    set_file_mtime(path, mtime);
+}
+
 #[test]
 fn file_watch_signer_loads_initial_key_and_signs() {
     let tmp = TempDir::new().expect("tempdir");
@@ -93,6 +116,7 @@ fn file_watch_signer_uses_replaced_key_without_restart() {
     .expect("file-watch signer builds");
 
     fs::write(&key_path, first_jwk).expect("refresh key");
+    bump_file_mtime(&key_path);
 
     assert_eq!(signer.readiness(), KeyReadiness::Ready);
     sign_and_verify(&signer, first_vk);
@@ -117,6 +141,7 @@ fn file_watch_signer_rejects_different_public_key_under_same_method_id() {
     let second = SigningKey::generate(&mut OsRng);
     fs::write(&key_path, jwk_from_keypair(&second, "did:web:example#fw-a"))
         .expect("write wrong-key replacement");
+    bump_file_mtime(&key_path);
 
     assert_eq!(signer.readiness(), KeyReadiness::Degraded);
     sign_and_verify(&signer, first_vk);
@@ -158,7 +183,14 @@ fn file_watch_signer_keeps_last_good_key_when_replacement_is_corrupt() {
     )
     .expect("file-watch signer builds");
 
+    let initial_mtime = file_mtime(&key_path);
     fs::write(&key_path, "{not valid jwk").expect("write corrupt replacement");
+    set_file_mtime(&key_path, initial_mtime);
+
+    assert_eq!(signer.readiness(), KeyReadiness::Ready);
+    sign_and_verify(&signer, vk);
+
+    bump_file_mtime(&key_path);
 
     assert_eq!(signer.readiness(), KeyReadiness::Degraded);
     sign_and_verify(&signer, vk);
