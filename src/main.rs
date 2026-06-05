@@ -36,6 +36,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Extension;
 use datafusion::execution::context::SessionContext;
 use registry_platform_audit::AuditChainProfile;
 use registry_relay::audit::{AuditPipeline, FileSink, StdoutSink, SyslogSink};
@@ -54,6 +55,7 @@ use registry_relay::provenance::{
     ResolvedProvenanceConfig,
 };
 use registry_relay::query::{AggregateQueryEngine, EntityQueryEngine};
+use registry_relay::runtime_config::{RelayRuntimeHandle, RelayRuntimeSnapshot};
 use registry_relay::serve::{serve_listener, ServeLimits};
 #[cfg(feature = "spdci-api-standards")]
 use registry_relay::spdci::build_spdci_response_mapper;
@@ -150,9 +152,120 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 async fn run_server(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let handle = Arc::new(RelayRuntimeHandle::new(
+        compile_relay_runtime(config_path).await?,
+    ));
+    let runtime = handle.load_full();
+    let app = build_relay_app_from_runtime(Arc::clone(&handle))?;
+
+    runtime
+        .ingest
+        .run_initial_ingest(runtime.readiness_tx.clone())
+        .await;
+    let (mut refresh_tasks, refresh_shutdown) = Arc::clone(&runtime.ingest)
+        .spawn_refresh_tasks_with_config(
+            &runtime.config,
+            runtime.readiness_tx.clone(),
+            Arc::clone(&runtime.audit_sink),
+        );
+
+    let provenance_state_for_log = runtime.provenance_state.as_ref().map(|state| {
+        let cfg = state.config();
+        (state.is_enabled(), cfg.mode, cfg.issuer_did.clone())
+    });
+
+    let listener = TcpListener::bind(runtime.bind).await.map_err(|err| {
+        error!(error = %err, bind = %runtime.bind, "failed to bind listener");
+        err
+    })?;
+
+    match provenance_state_for_log.as_ref() {
+        Some((enabled, mode, issuer_did)) => {
+            info!(
+                bind = %runtime.bind,
+                admin_bind = ?runtime.admin_bind,
+                datasets = runtime.dataset_count(),
+                api_keys = runtime.auth_size_hint(),
+                audit_sink = runtime.audit_kind,
+                provenance_enabled = *enabled,
+                provenance_mode = ?mode,
+                provenance_issuer_did = %issuer_did,
+                "registry-relay listening"
+            );
+        }
+        None => {
+            info!(
+                bind = %runtime.bind,
+                admin_bind = ?runtime.admin_bind,
+                datasets = runtime.dataset_count(),
+                api_keys = runtime.auth_size_hint(),
+                audit_sink = runtime.audit_kind,
+                provenance_enabled = false,
+                "registry-relay listening"
+            );
+        }
+    }
+
+    let admin_listener = match runtime.admin_bind {
+        Some(addr) => Some(TcpListener::bind(addr).await.map_err(|err| {
+            error!(error = %err, bind = %addr, "failed to bind admin listener");
+            err
+        })?),
+        None => None,
+    };
+
+    let serve_limits = ServeLimits::from_config(&runtime.config.server);
+    let main_serve = serve_listener(listener, app, serve_limits, shutdown_signal());
+
+    // Run both servers concurrently. `tokio::select!` is the natural
+    // fit because either listener exiting (clean or not) tears down
+    // the other.
+    let result: Result<(), Box<dyn std::error::Error + Send + Sync>> =
+        if let Some(admin_listener) = admin_listener {
+            let admin_app = registry_relay::server::build_admin_app_with_metadata_and_metrics(
+                Arc::clone(&runtime.config),
+                Arc::clone(&runtime.auth),
+                Arc::clone(&runtime.audit_sink),
+                runtime.readiness_rx.clone(),
+                runtime.readiness_tx.clone(),
+                Arc::clone(&runtime.ingest),
+                runtime.compiled_metadata.clone(),
+                Arc::clone(&runtime.metrics),
+            )?
+            .layer(Extension(Arc::clone(&handle)));
+            let admin_serve =
+                serve_listener(admin_listener, admin_app, serve_limits, shutdown_signal());
+            tokio::select! {
+                r = main_serve => r.map_err(Into::into),
+                r = admin_serve => r.map_err(Into::into),
+            }
+        } else {
+            main_serve.await.map_err(Into::into)
+        };
+
+    // Best-effort audit flush on the way out, regardless of which
+    // listener tripped the shutdown.
+    if let Err(err) = runtime.audit_sink.flush().await {
+        warn!(error = %err, "audit flush on shutdown failed");
+    }
+
+    refresh_shutdown.cancel();
+    while let Some(joined) = refresh_tasks.join_next().await {
+        if let Err(err) = joined {
+            warn!(error = %err, "refresh task failed during shutdown");
+        }
+    }
+
+    result
+}
+
+async fn compile_relay_runtime(
+    config_path: PathBuf,
+) -> Result<RelayRuntimeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     info!(path = %config_path.display(), "loading registry-relay config");
 
     let loaded = config::load_with_metadata(&config_path)?;
+    let config_provenance = loaded.provenance.clone();
     let compiled_metadata = loaded.metadata.map(Arc::new);
     let config = Arc::new(loaded.runtime);
 
@@ -182,21 +295,8 @@ async fn run_server(config_path: PathBuf) -> Result<(), Box<dyn std::error::Erro
     ));
     let initial_snapshot = ingest.snapshot();
     let (readiness_tx, readiness_rx) = watch::channel::<ReadinessSnapshot>(initial_snapshot);
+    let cursor_signer = Arc::new(registry_relay::runtime_config::CursorSigner::new_random());
 
-    ingest.run_initial_ingest(readiness_tx.clone()).await;
-    let (mut refresh_tasks, refresh_shutdown) = Arc::clone(&ingest)
-        .spawn_refresh_tasks_with_config(&config, readiness_tx.clone(), Arc::clone(&audit_sink));
-
-    let dataset_count = config.datasets.len();
-    // Operational startup log: a per-mode size hint. For `api_key` this
-    // is the configured key count; for `oidc` it is 0 (the real signal
-    // is the issuer URL, logged separately when the provider is wired).
-    // Read off the config rather than the provider so the wiring layer
-    // doesn't need a `len()` method on the trait.
-    let auth_size_hint = match config.auth.mode {
-        config::AuthMode::ApiKey => config.auth.api_keys.len(),
-        config::AuthMode::Oidc => 0,
-    };
     // Build provenance state from the parsed config.
     // `build_resolved_provenance_config` returns:
     //   * `Ok(None)` when the operator omitted the `provenance:` block
@@ -210,114 +310,58 @@ async fn run_server(config_path: PathBuf) -> Result<(), Box<dyn std::error::Erro
     let publicschema_registry = build_publicschema_registry(&config)?.map(Arc::new);
     #[cfg(feature = "spdci-api-standards")]
     let spdci_response_mapper = build_spdci_response_mapper(&config)?.map(Arc::new);
-    let provenance_state_for_log = provenance_state.as_ref().map(|state| {
-        let cfg = state.config();
-        (state.is_enabled(), cfg.mode, cfg.issuer_did.clone())
-    });
     let metrics = RequestMetrics::shared();
+
+    Ok(RelayRuntimeSnapshot {
+        config,
+        config_provenance,
+        compiled_metadata,
+        auth,
+        audit_sink,
+        bind,
+        admin_bind,
+        audit_kind,
+        df_ctx,
+        ingest,
+        entity_registry,
+        query,
+        aggregate_query,
+        readiness_tx,
+        readiness_rx,
+        cursor_signer,
+        provenance_state,
+        publicschema_registry,
+        #[cfg(feature = "spdci-api-standards")]
+        spdci_response_mapper,
+        metrics,
+    })
+}
+
+fn build_relay_app_from_runtime(
+    handle: Arc<RelayRuntimeHandle>,
+) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
+    let runtime = handle.load_full();
     let mut app =
         registry_relay::server::build_app_with_entity_query_metadata_provenance_and_metrics(
-            Arc::clone(&config),
-            Arc::clone(&auth),
-            Arc::clone(&audit_sink),
-            readiness_rx.clone(),
-            entity_registry,
-            query,
-            aggregate_query,
-            compiled_metadata.clone(),
-            provenance_state.clone(),
-            Arc::clone(&metrics),
+            Arc::clone(&runtime.config),
+            Arc::clone(&runtime.auth),
+            Arc::clone(&runtime.audit_sink),
+            runtime.readiness_rx.clone(),
+            Arc::clone(&runtime.entity_registry),
+            Arc::clone(&runtime.query),
+            Arc::clone(&runtime.aggregate_query),
+            runtime.compiled_metadata.clone(),
+            runtime.provenance_state.clone(),
+            Arc::clone(&runtime.metrics),
         )?;
-    if let Some(publicschema_registry) = publicschema_registry {
-        app = app.layer(axum::Extension(publicschema_registry));
+    if let Some(publicschema_registry) = &runtime.publicschema_registry {
+        app = app.layer(Extension(Arc::clone(publicschema_registry)));
     }
     #[cfg(feature = "spdci-api-standards")]
-    if let Some(spdci_response_mapper) = spdci_response_mapper {
-        app = app.layer(axum::Extension(spdci_response_mapper));
+    if let Some(spdci_response_mapper) = &runtime.spdci_response_mapper {
+        app = app.layer(Extension(Arc::clone(spdci_response_mapper)));
     }
-
-    let listener = TcpListener::bind(bind).await.map_err(|err| {
-        error!(error = %err, bind = %bind, "failed to bind listener");
-        err
-    })?;
-
-    match provenance_state_for_log.as_ref() {
-        Some((enabled, mode, issuer_did)) => {
-            info!(
-                bind = %bind,
-                admin_bind = ?admin_bind,
-                datasets = dataset_count,
-                api_keys = auth_size_hint,
-                audit_sink = audit_kind,
-                provenance_enabled = *enabled,
-                provenance_mode = ?mode,
-                provenance_issuer_did = %issuer_did,
-                "registry-relay listening"
-            );
-        }
-        None => {
-            info!(
-                bind = %bind,
-                admin_bind = ?admin_bind,
-                datasets = dataset_count,
-                api_keys = auth_size_hint,
-                audit_sink = audit_kind,
-                provenance_enabled = false,
-                "registry-relay listening"
-            );
-        }
-    }
-
-    let admin_listener = match admin_bind {
-        Some(addr) => Some(TcpListener::bind(addr).await.map_err(|err| {
-            error!(error = %err, bind = %addr, "failed to bind admin listener");
-            err
-        })?),
-        None => None,
-    };
-
-    let serve_limits = ServeLimits::from_config(&config.server);
-    let main_serve = serve_listener(listener, app, serve_limits, shutdown_signal());
-
-    // Run both servers concurrently. `tokio::select!` is the natural
-    // fit because either listener exiting (clean or not) tears down
-    // the other.
-    let result: Result<(), Box<dyn std::error::Error + Send + Sync>> =
-        if let Some(admin_listener) = admin_listener {
-            let admin_app = registry_relay::server::build_admin_app_with_metadata_and_metrics(
-                Arc::clone(&config),
-                Arc::clone(&auth),
-                Arc::clone(&audit_sink),
-                readiness_rx.clone(),
-                readiness_tx.clone(),
-                Arc::clone(&ingest),
-                compiled_metadata.clone(),
-                Arc::clone(&metrics),
-            )?;
-            let admin_serve =
-                serve_listener(admin_listener, admin_app, serve_limits, shutdown_signal());
-            tokio::select! {
-                r = main_serve => r.map_err(Into::into),
-                r = admin_serve => r.map_err(Into::into),
-            }
-        } else {
-            main_serve.await.map_err(Into::into)
-        };
-
-    // Best-effort audit flush on the way out, regardless of which
-    // listener tripped the shutdown.
-    if let Err(err) = audit_sink.flush().await {
-        warn!(error = %err, "audit flush on shutdown failed");
-    }
-
-    refresh_shutdown.cancel();
-    while let Some(joined) = refresh_tasks.join_next().await {
-        if let Err(err) = joined {
-            warn!(error = %err, "refresh task failed during shutdown");
-        }
-    }
-
-    result
+    Ok(app.layer(Extension(handle)))
 }
 
 fn parse_cli_command_from(args: Vec<String>) -> Result<CliCommand, CliError> {
@@ -672,8 +716,8 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_audit_sink, parse_cli_command_from, run_healthcheck, CliCommand,
-        OperationalLogFormat, DEFAULT_HEALTHCHECK_TIMEOUT_MS, DEFAULT_HEALTHCHECK_URL,
+        build_audit_sink, compile_relay_runtime, parse_cli_command_from, run_healthcheck,
+        CliCommand, OperationalLogFormat, DEFAULT_HEALTHCHECK_TIMEOUT_MS, DEFAULT_HEALTHCHECK_URL,
     };
     use axum::routing::get;
     use axum::Router;
@@ -722,6 +766,7 @@ mod tests {
             duration_ms: 7,
             error_code: None,
             provenance: None,
+            config: None,
         }
     }
 
@@ -748,6 +793,27 @@ audit:
             hash_secret_env
         ))
         .expect("test config parses")
+    }
+
+    fn runtime_config_yaml(hash_secret_env: &str) -> String {
+        format!(
+            r#"
+server:
+  bind: 127.0.0.1:0
+catalog:
+  title: Test
+  base_url: https://data.example.test
+  publisher: Test
+vocabularies: {{}}
+auth:
+  mode: api_key
+  api_keys: []
+datasets: []
+audit:
+  sink: stdout
+  hash_secret_env: {hash_secret_env}
+"#
+        )
     }
 
     fn command_args(args: &[&str]) -> Vec<String> {
@@ -900,6 +966,46 @@ audit:
         assert!(
             err.to_string().contains("request failed"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compile_relay_runtime_is_named_fail_closed_boundary() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("relay.yaml");
+        let env_name = "REGISTRY_RELAY_TEST_COMPILE_MISSING_AUDIT_HASH";
+        std::env::remove_var(env_name);
+        std::fs::write(&config_path, runtime_config_yaml(env_name)).expect("config writes");
+
+        let err = match compile_relay_runtime(config_path).await {
+            Ok(_) => panic!("missing audit secret should fail compile"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("missing")
+                || err.to_string().contains("Missing")
+                || err.to_string().contains("validation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn compile_relay_runtime_does_not_start_ingest_or_refresh_tasks() {
+        let source = include_str!("main.rs");
+        let compile_body = source
+            .split("async fn compile_relay_runtime")
+            .nth(1)
+            .and_then(|tail| tail.split("fn build_relay_app_from_runtime").next())
+            .expect("compile_relay_runtime body is present");
+
+        assert!(
+            !compile_body.contains("run_initial_ingest"),
+            "compile boundary must not perform initial ingest side effects"
+        );
+        assert!(
+            !compile_body.contains("spawn_refresh_tasks"),
+            "compile boundary must not start background refresh tasks"
         );
     }
 

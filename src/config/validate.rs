@@ -39,6 +39,7 @@ const ADMIN_SCOPE: &str = "admin";
 pub fn run(config: &Config) -> Result<(), Error> {
     super::vocabularies::validate_registry(&config.vocabularies).map_err(Error::from)?;
     validate_server(config).map_err(Error::from)?;
+    validate_config_trust(config).map_err(Error::from)?;
     validate_auth_mode(config).map_err(Error::from)?;
     validate_ids_and_uniqueness(config).map_err(Error::from)?;
     validate_scopes(config).map_err(Error::from)?;
@@ -51,6 +52,30 @@ pub fn run(config: &Config) -> Result<(), Error> {
     }
     validate_publicschema_feature(config).map_err(Error::from)?;
     validate_spdci_feature(config).map_err(Error::from)?;
+    Ok(())
+}
+
+fn validate_config_trust(config: &Config) -> Result<(), ConfigError> {
+    let Some(config_trust) = &config.config_trust else {
+        return Ok(());
+    };
+    if config_trust.antirollback_state_path.as_os_str().is_empty() {
+        tracing::error!(
+            code = "config.validation_error",
+            "config_trust.antirollback_state_path must not be empty"
+        );
+        return Err(ConfigError::ValidationError);
+    }
+    for root in &config_trust.accepted_roots {
+        if let Err(error) = root.validate() {
+            tracing::error!(
+                code = "config.validation_error",
+                error = %error,
+                "config_trust.accepted_roots contains an invalid trust root"
+            );
+            return Err(ConfigError::ValidationError);
+        }
+    }
     Ok(())
 }
 
@@ -960,6 +985,29 @@ fn validate_provenance(cfg: &super::provenance::ProvenanceConfig) -> Result<(), 
                     );
                     return Err(ConfigError::ProvenanceJwkEnvMissing);
                 }
+            }
+        }
+        SignerConfig::FileWatch(s) => {
+            if s.signing_algorithm != super::provenance::ProvenanceAlgorithm::EdDSA {
+                tracing::error!(
+                    code = "provenance.config.algorithm_unsupported",
+                    "file_watch signer supports only EdDSA in V1",
+                );
+                return Err(ConfigError::ProvenanceAlgorithmUnsupported);
+            }
+            if s.path.as_os_str().is_empty() {
+                tracing::error!(
+                    code = "provenance.config.file_watch_path_missing",
+                    "file_watch signer path must not be empty",
+                );
+                return Err(ConfigError::ProvenanceSignerKindInvalid);
+            }
+            if cfg.enabled && !s.path.is_file() {
+                tracing::error!(
+                    code = "provenance.config.file_watch_key_missing",
+                    "file_watch signer key file is missing or not a regular file",
+                );
+                return Err(ConfigError::ProvenanceJwkEnvMissing);
             }
         }
         SignerConfig::Kms(k) => {

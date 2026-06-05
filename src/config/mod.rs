@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use registry_platform_config::RegistryTrustRoot;
 use serde::{Deserialize, Serialize};
 
 pub mod capabilities;
@@ -33,9 +34,9 @@ pub mod vocabularies;
 
 pub use loader::{load, load_metadata_manifest, load_with_metadata, LoadedConfig};
 pub use provenance::{
-    ClaimValidity, DelegatedIssuerConfig, GatewayIssuerConfig, IssuerConfig, KmsProvider,
-    KmsSignerConfig, ProvenanceAlgorithm, ProvenanceConfig, RetiredKeyConfig, SignerConfig,
-    SoftwareSignerConfig,
+    ClaimValidity, DelegatedIssuerConfig, FileWatchSignerConfig, GatewayIssuerConfig, IssuerConfig,
+    KmsProvider, KmsSignerConfig, ProvenanceAlgorithm, ProvenanceConfig, RetiredKeyConfig,
+    SignerConfig, SoftwareSignerConfig,
 };
 
 /// Root configuration document. Parsed from YAML at startup.
@@ -45,6 +46,8 @@ pub struct Config {
     #[serde(default)]
     pub instance: InstanceConfig,
     pub server: ServerConfig,
+    #[serde(default)]
+    pub config_trust: Option<ConfigTrustConfig>,
     #[serde(default)]
     pub metadata: Option<MetadataConfig>,
     pub catalog: CatalogConfig,
@@ -91,6 +94,18 @@ impl Default for InstanceConfig {
 
 fn default_instance_id() -> String {
     "registry-relay-local".to_string()
+}
+
+/// Optional governed-configuration local trust state.
+///
+/// Simple local deployments omit this block. Signed/governed apply requires it
+/// so anti-rollback state lives in an explicit durable location.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigTrustConfig {
+    pub antirollback_state_path: PathBuf,
+    #[serde(default)]
+    pub accepted_roots: Vec<RegistryTrustRoot>,
 }
 
 /// Optional split metadata manifest loaded alongside the runtime config.
