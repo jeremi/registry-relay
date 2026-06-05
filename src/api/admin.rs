@@ -35,10 +35,15 @@ use tokio::sync::watch;
 use crate::audit::{ConfigAuditExt, ErrorCodeExt};
 use crate::auth::scopes::require_scope;
 use crate::auth::Principal;
-use crate::config::{self, AuthMode, Config, DatasetId, IssuerConfig, ResourceId, SignerConfig};
+use crate::config::{
+    self, AuthMode, Config, DatasetId, IssuerConfig, ProvenanceConfig, ResourceId, SignerConfig,
+};
 use crate::error::{AdminError, AuthError, Error, IngestError};
 use crate::ingest::{IngestRegistry, ReadinessSnapshot};
-use crate::provenance::{build_resolved_provenance_config, ProvenanceState};
+use crate::provenance::{
+    build_resolved_provenance_config, BuildStateError, ProvenanceState, ResolvedProvenanceConfig,
+    Signer,
+};
 use crate::runtime_config::RuntimeSnapshot;
 
 const PROBLEM_JSON: HeaderValue = HeaderValue::from_static("application/problem+json");
@@ -50,6 +55,32 @@ const CONFIG_APPLY_UNAVAILABLE_CODE: &str = "admin.config_apply_unavailable";
 const POSTURE_FILTER_FAILED_CODE: &str = "admin.posture_filter_failed";
 const POSTURE_TIER_INVALID_CODE: &str = "admin.posture_tier_invalid";
 const OPS_READ_SCOPE: &str = "registry_relay:ops_read";
+
+#[doc(hidden)]
+pub type CandidateProvenanceResolverRef = Arc<dyn CandidateProvenanceResolver>;
+
+#[doc(hidden)]
+pub trait CandidateProvenanceResolver: Send + Sync {
+    fn resolve_candidate_provenance(
+        &self,
+        cfg: Option<&ProvenanceConfig>,
+    ) -> Result<Option<ResolvedProvenanceConfig>, BuildStateError>;
+}
+
+#[derive(Debug, Default)]
+struct DefaultCandidateProvenanceResolver;
+
+impl CandidateProvenanceResolver for DefaultCandidateProvenanceResolver {
+    fn resolve_candidate_provenance(
+        &self,
+        cfg: Option<&ProvenanceConfig>,
+    ) -> Result<Option<ResolvedProvenanceConfig>, BuildStateError> {
+        build_resolved_provenance_config(cfg)
+    }
+}
+
+static DEFAULT_CANDIDATE_PROVENANCE_RESOLVER: DefaultCandidateProvenanceResolver =
+    DefaultCandidateProvenanceResolver;
 
 /// Sub-router for admin reload routes.
 pub fn router<S>() -> Router<S>
@@ -166,6 +197,7 @@ impl ConfigAdminAction {
 async fn config_verify(
     runtime: RuntimeSnapshot,
     principal: Option<Extension<Principal>>,
+    resolver: Option<Extension<CandidateProvenanceResolverRef>>,
     Json(request): Json<ConfigApplyRequest>,
 ) -> Response {
     if let Err(error) = require_admin_scope(principal) {
@@ -269,6 +301,7 @@ async fn config_verify(
         &current,
         &candidate,
         live_change_authorization(&resolved),
+        resolver_from_extension(resolver.as_ref()),
     ) {
         Ok(LiveConfigChange::Compatible { .. }) => true,
         Ok(LiveConfigChange::RestartRequired) => false,
@@ -308,6 +341,7 @@ async fn config_verify(
 async fn config_dry_run(
     runtime: RuntimeSnapshot,
     principal: Option<Extension<Principal>>,
+    resolver: Option<Extension<CandidateProvenanceResolverRef>>,
     Json(request): Json<ConfigApplyRequest>,
 ) -> Response {
     if let Err(error) = require_admin_scope(principal) {
@@ -411,6 +445,7 @@ async fn config_dry_run(
         &current,
         &candidate,
         live_change_authorization(&resolved),
+        resolver_from_extension(resolver.as_ref()),
     ) {
         Ok(LiveConfigChange::Compatible { .. }) => true,
         Ok(LiveConfigChange::RestartRequired) => false,
@@ -455,6 +490,7 @@ async fn config_dry_run(
 async fn config_apply(
     runtime: RuntimeSnapshot,
     principal: Option<Extension<Principal>>,
+    resolver: Option<Extension<CandidateProvenanceResolverRef>>,
     Json(request): Json<ConfigApplyRequest>,
 ) -> Response {
     if let Err(error) = require_admin_scope(principal) {
@@ -618,6 +654,7 @@ async fn config_apply(
         &current,
         &candidate,
         live_change_authorization(&resolved),
+        resolver_from_extension(resolver.as_ref()),
     ) {
         Ok(change) => change,
         Err(detail) => {
@@ -659,6 +696,24 @@ async fn config_apply(
             ),
         );
     };
+    if !candidate_signing_readiness(provenance_state.as_deref()).is_ready() {
+        return config_apply_report(
+            resolved.bundle_id.clone(),
+            resolved.sequence,
+            ApplyReportResult::RejectedReadiness,
+            false,
+            false,
+            StatusCode::CONFLICT,
+            resolved_config_audit(
+                ConfigAdminAction::Apply,
+                &resolved,
+                "accepted",
+                ApplyReportResult::RejectedReadiness.as_str(),
+                false,
+                false,
+            ),
+        );
+    }
     let Some(config_trust) = &current.config.config_trust else {
         return with_config_audit(
             config_apply_unavailable("config_trust.antirollback_state_path is not configured"),
@@ -1267,6 +1322,14 @@ struct LiveChangeAuthorization {
     root_transition: bool,
 }
 
+fn resolver_from_extension(
+    resolver: Option<&Extension<CandidateProvenanceResolverRef>>,
+) -> &dyn CandidateProvenanceResolver {
+    resolver
+        .map(|Extension(resolver)| resolver.as_ref())
+        .unwrap_or(&DEFAULT_CANDIDATE_PROVENANCE_RESOLVER)
+}
+
 fn live_change_authorization(candidate: &ResolvedConfigCandidate) -> LiveChangeAuthorization {
     LiveChangeAuthorization {
         signing_key_rotation: candidate.change_classes.contains("signing_key_rotation"),
@@ -1279,6 +1342,7 @@ fn classify_live_config_change(
     current: &crate::runtime_config::RelayRuntimeSnapshot,
     candidate: &Config,
     authorization: LiveChangeAuthorization,
+    resolver: &dyn CandidateProvenanceResolver,
 ) -> Result<LiveConfigChange, &'static str> {
     if is_metadata_only_config_change(&current.config, candidate) {
         return Ok(LiveConfigChange::Compatible {
@@ -1299,7 +1363,8 @@ fn classify_live_config_change(
     let Some(current_state) = current.provenance_state.as_deref() else {
         return Ok(LiveConfigChange::RestartRequired);
     };
-    let resolved = build_resolved_provenance_config(candidate.provenance.as_ref())
+    let resolved = resolver
+        .resolve_candidate_provenance(candidate.provenance.as_ref())
         .map_err(|_| "candidate provenance could not be resolved")?
         .ok_or("candidate provenance could not be resolved")?;
     let active_key_changed =
@@ -1343,6 +1408,14 @@ fn classify_live_config_change(
         ))),
         local_approval_change_class: None,
     })
+}
+
+fn candidate_signing_readiness(provenance_state: Option<&ProvenanceState>) -> KeyReadiness {
+    signing_readiness_for_apply(provenance_state.map(|state| state.config().signer.as_ref()))
+}
+
+fn signing_readiness_for_apply(signer: Option<&dyn Signer>) -> KeyReadiness {
+    signer.map(Signer::readiness).unwrap_or(KeyReadiness::Ready)
 }
 
 fn removed_retired_key_ids(
@@ -2163,6 +2236,42 @@ fn posture_filter_failed(error: PostureFilterError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provenance::SigningAlgorithm;
+
+    struct ReadinessTestSigner {
+        readiness: KeyReadiness,
+    }
+
+    impl Signer for ReadinessTestSigner {
+        fn algorithm(&self) -> SigningAlgorithm {
+            SigningAlgorithm::EdDSA
+        }
+
+        fn verification_method_id(&self) -> &str {
+            "did:web:example#readiness"
+        }
+
+        fn sign(
+            &self,
+            _header: Value,
+            _payload: Value,
+        ) -> Result<String, crate::provenance::SignerError> {
+            Ok("e30.e30.c2lnbmF0dXJl".to_string())
+        }
+
+        fn public_jwk(&self) -> Value {
+            json!({
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "kid": self.verification_method_id(),
+            })
+        }
+
+        fn readiness(&self) -> KeyReadiness {
+            self.readiness
+        }
+    }
 
     #[test]
     fn config_request_rejects_ambiguous_local_and_remote_tuf_source() {
@@ -2181,6 +2290,34 @@ mod tests {
         assert!(
             request.is_err(),
             "TUF request must choose exactly one local or remote source shape"
+        );
+    }
+
+    #[test]
+    fn signing_readiness_for_apply_defaults_ready_and_honors_signer_state() {
+        assert_eq!(signing_readiness_for_apply(None), KeyReadiness::Ready);
+
+        let ready = ReadinessTestSigner {
+            readiness: KeyReadiness::Ready,
+        };
+        let degraded = ReadinessTestSigner {
+            readiness: KeyReadiness::Degraded,
+        };
+        let not_ready = ReadinessTestSigner {
+            readiness: KeyReadiness::NotReady,
+        };
+
+        assert_eq!(
+            signing_readiness_for_apply(Some(&ready)),
+            KeyReadiness::Ready
+        );
+        assert_eq!(
+            signing_readiness_for_apply(Some(&degraded)),
+            KeyReadiness::Degraded
+        );
+        assert_eq!(
+            signing_readiness_for_apply(Some(&not_ready)),
+            KeyReadiness::NotReady
         );
     }
 }

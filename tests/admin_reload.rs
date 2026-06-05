@@ -17,15 +17,19 @@ use registry_platform_ops::{
     internal_config_hash, posture_safe_runtime_config_hash, AntiRollbackKey, AntiRollbackRecord,
     ConfigProvenance, FileAntiRollbackStore, FileLocalApprovalStore,
 };
+use registry_relay::api::admin::{CandidateProvenanceResolver, CandidateProvenanceResolverRef};
 use registry_relay::audit::{AuditPipeline, InMemorySink};
 use registry_relay::auth::api_key::{ApiKeyAuth, ApiKeyEntry};
 use registry_relay::auth::ScopeSet;
-use registry_relay::config::{self, Config};
+use registry_relay::config::{self, Config, ProvenanceConfig};
 use registry_relay::entity::EntityRegistry;
 use registry_relay::format::FormatRegistry;
 use registry_relay::ingest::{IngestRegistry, ReadinessSnapshot};
 use registry_relay::observability::RequestMetrics;
-use registry_relay::provenance::{build_resolved_provenance_config, ProvenanceState};
+use registry_relay::provenance::{
+    build_resolved_provenance_config, BuildStateError, ProvenanceState, ResolvedProvenanceConfig,
+    Signer, SignerError, SigningAlgorithm,
+};
 use registry_relay::query::{AggregateQueryEngine, EntityQueryEngine};
 use registry_relay::runtime_config::{CursorSigner, RelayRuntimeHandle, RelayRuntimeSnapshot};
 use registry_relay::server::{build_admin_app, build_app_with_entity_query};
@@ -47,6 +51,53 @@ const AUDIT_SECRET_VALUE: &str = "relay-admin-reload-audit-secret-32-bytes";
 const PRIVATE_JWK_VALUE: &str = r#"{"kty":"OKP","crv":"Ed25519","kid":"relay-private-key","d":"private-jwk-material","x":"public-jwk-material"}"#;
 const TUF_TARGETS_SIGNER_KID: &str =
     "8ec3a843a0f9328c863cac4046ab1cacbbc67888476ac7acf73d9bcd9a223ada";
+
+struct ReadinessOverrideResolver {
+    readiness: registry_platform_crypto::KeyReadiness,
+}
+
+impl CandidateProvenanceResolver for ReadinessOverrideResolver {
+    fn resolve_candidate_provenance(
+        &self,
+        cfg: Option<&ProvenanceConfig>,
+    ) -> Result<Option<ResolvedProvenanceConfig>, BuildStateError> {
+        let Some(mut resolved) = build_resolved_provenance_config(cfg)? else {
+            return Ok(None);
+        };
+        resolved.signer = Arc::new(ReadinessOverrideSigner {
+            inner: Arc::clone(&resolved.signer),
+            readiness: self.readiness,
+        });
+        Ok(Some(resolved))
+    }
+}
+
+struct ReadinessOverrideSigner {
+    inner: Arc<dyn Signer>,
+    readiness: registry_platform_crypto::KeyReadiness,
+}
+
+impl Signer for ReadinessOverrideSigner {
+    fn algorithm(&self) -> SigningAlgorithm {
+        self.inner.algorithm()
+    }
+
+    fn verification_method_id(&self) -> &str {
+        self.inner.verification_method_id()
+    }
+
+    fn sign(&self, header: Value, payload: Value) -> Result<String, SignerError> {
+        self.inner.sign(header, payload)
+    }
+
+    fn public_jwk(&self) -> Value {
+        self.inner.public_jwk()
+    }
+
+    fn readiness(&self) -> registry_platform_crypto::KeyReadiness {
+        self.readiness
+    }
+}
 
 struct AdminFixture {
     _tmp: TempDir,
@@ -402,6 +453,20 @@ fn build_fixture_from_config_path_with_provenance_state(
     config_path: std::path::PathBuf,
     include_provenance_state: bool,
 ) -> AdminFixture {
+    build_fixture_from_config_path_with_provenance_state_and_admin_resolver(
+        tmp,
+        config_path,
+        include_provenance_state,
+        None,
+    )
+}
+
+fn build_fixture_from_config_path_with_provenance_state_and_admin_resolver(
+    tmp: TempDir,
+    config_path: std::path::PathBuf,
+    include_provenance_state: bool,
+    admin_resolver: Option<CandidateProvenanceResolverRef>,
+) -> AdminFixture {
     #[allow(unused_unsafe)]
     unsafe {
         std::env::set_var("REGISTRY_RELAY_TEST_AUDIT_HASH_SECRET", AUDIT_SECRET_VALUE);
@@ -476,7 +541,7 @@ fn build_fixture_from_config_path_with_provenance_state(
         aggregate_query,
     )
     .expect("public app builds");
-    let app = build_admin_app(
+    let mut app = build_admin_app(
         Arc::clone(&config),
         auth,
         sink,
@@ -486,6 +551,9 @@ fn build_fixture_from_config_path_with_provenance_state(
     )
     .expect("admin app builds")
     .layer(axum::Extension(Arc::clone(&handle)));
+    if let Some(admin_resolver) = admin_resolver {
+        app = app.layer(axum::Extension(admin_resolver));
+    }
 
     AdminFixture {
         _tmp: tmp,
@@ -2113,6 +2181,104 @@ async fn config_apply_signed_provenance_rotation_swaps_runtime_snapshot() {
         "ready"
     );
     assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+}
+
+#[tokio::test]
+async fn config_apply_signed_provenance_rotation_rejects_non_ready_candidate_before_antirollback() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(&tmp);
+    let old_key_path = tmp.path().join("provenance-old.jwk");
+    let old_kid = "did:web:data.example.test#relay-public-key";
+    let old_public_jwk = write_ed25519_jwk(&old_key_path, old_kid);
+    let yaml = std::fs::read_to_string(&config_path)
+        .expect("config reads")
+        .replace("enabled: false", "enabled: true")
+        .replace(
+            "kind: software\n      jwk_env: REGISTRY_RELAY_TEST_PRIVATE_JWK\n      signing_algorithm: EdDSA",
+            &format!(
+                "kind: file_watch\n      path: \"{}\"\n      signing_algorithm: EdDSA",
+                old_key_path.to_string_lossy()
+            ),
+        );
+    std::fs::write(&config_path, yaml).expect("config writes");
+    let admin_resolver: CandidateProvenanceResolverRef = Arc::new(ReadinessOverrideResolver {
+        readiness: registry_platform_crypto::KeyReadiness::Degraded,
+    });
+    let fixture = build_fixture_from_config_path_with_provenance_state_and_admin_resolver(
+        tmp,
+        config_path,
+        true,
+        Some(admin_resolver),
+    );
+
+    let new_key_path = fixture._tmp.path().join("provenance-new.jwk");
+    let new_kid = "did:web:data.example.test#relay-public-key-2";
+    write_ed25519_jwk(&new_key_path, new_kid);
+    unsafe {
+        std::env::set_var(
+            "REGISTRY_RELAY_RETIRED_PROVENANCE_JWK",
+            serde_json::to_string(&old_public_jwk).expect("old public jwk serializes"),
+        );
+    }
+    let candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace(
+            "verification_method_id: did:web:data.example.test#relay-public-key\n    signer:\n      kind: file_watch",
+            "verification_method_id: did:web:data.example.test#relay-public-key-2\n    signer:\n      kind: file_watch",
+        )
+        .replace(
+            &format!("path: \"{}\"", old_key_path.to_string_lossy()),
+            &format!("path: \"{}\"", new_key_path.to_string_lossy()),
+        )
+        .replace(
+            "signing_algorithm: EdDSA\n",
+            "signing_algorithm: EdDSA\n    retired_keys:\n      - verification_method_id: did:web:data.example.test#relay-public-key\n        jwk_env: REGISTRY_RELAY_RETIRED_PROVENANCE_JWK\n        retired_after: 2026-06-05T00:00:00Z\n",
+        );
+    let signed = write_signed_config_tuf_fixture_with_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+        &["signing_key_rotation"],
+    )
+    .await;
+
+    let response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        signed_tuf_apply_request(&signed),
+        ADMIN_KEY,
+    )
+    .await;
+
+    response.assert_status(StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(body["result"], "rejected_readiness");
+    assert_eq!(body["posture_result"], "rejected");
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["restart_required"], false);
+
+    let record = FileAntiRollbackStore::new(&fixture.antirollback_path)
+        .load(&AntiRollbackKey {
+            product: "registry-relay".to_string(),
+            instance_id: "relay-test-instance".to_string(),
+            environment: "lab".to_string(),
+            stream_id: "test-stream".to_string(),
+        })
+        .expect("antirollback state loads");
+    assert_eq!(record.last_sequence, 0);
+    assert_eq!(record.last_config_hash, fixture.current_config_hash);
+
+    let posture = fixture
+        .server
+        .get("/admin/v1/posture?tier=restricted")
+        .add_header("Authorization", format!("Bearer {OPS_KEY}"))
+        .await;
+    posture.assert_status(StatusCode::OK);
+    let posture: Value = posture.json();
+    assert_eq!(posture["relay"]["provenance"]["active_kid"], old_kid);
+    assert_eq!(posture["configuration"]["last_apply_result"], Value::Null);
 }
 
 #[tokio::test]
