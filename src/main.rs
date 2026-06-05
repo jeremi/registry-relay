@@ -46,7 +46,8 @@ use registry_relay::auth::oidc::{OidcAuth, ReqwestJwksFetcher};
 use registry_relay::auth::ScopeSet;
 use registry_relay::config::governed::{
     authorize_signed_config_candidate, parse_candidate_config_with_provenance,
-    resolve_tuf_config_candidate, LocalTufConfigTargetRequest, TufConfigTargetRequest,
+    resolve_tuf_config_candidate, LocalTufConfigTargetRequest, RemoteTufConfigTargetRequest,
+    TufConfigTargetRequest,
 };
 use registry_relay::config::{self, ApiKeyConfig, AuditSinkConfig, Config, OidcConfig};
 use registry_relay::entity::EntityRegistry;
@@ -100,8 +101,11 @@ const DEFAULT_CONFIG_PATH: &str = "./config/example.yaml";
 const ROOT_PATH_FLAG: &str = "--root-path";
 const METADATA_DIR_FLAG: &str = "--metadata-dir";
 const TARGETS_DIR_FLAG: &str = "--targets-dir";
+const METADATA_BASE_URL_FLAG: &str = "--metadata-base-url";
+const TARGETS_BASE_URL_FLAG: &str = "--targets-base-url";
 const DATASTORE_DIR_FLAG: &str = "--datastore-dir";
 const TARGET_NAME_FLAG: &str = "--target-name";
+const ALLOW_DEV_INSECURE_FETCH_URLS_FLAG: &str = "--allow-dev-insecure-fetch-urls";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
@@ -114,10 +118,22 @@ enum CliCommand {
 struct ConfigVerifyBundleCommand {
     config_path: PathBuf,
     root_path: PathBuf,
-    metadata_dir: PathBuf,
-    targets_dir: PathBuf,
     datastore_dir: PathBuf,
     target_name: String,
+    source: ConfigVerifyBundleSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigVerifyBundleSource {
+    Local {
+        metadata_dir: PathBuf,
+        targets_dir: PathBuf,
+    },
+    Remote {
+        metadata_base_url: String,
+        targets_base_url: String,
+        allow_dev_insecure_fetch_urls: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,13 +309,30 @@ async fn run_config_verify_bundle(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let loaded = config::load_with_metadata(&command.config_path)?;
     let current_config = loaded.runtime;
-    let request = TufConfigTargetRequest::Local(LocalTufConfigTargetRequest {
-        root_path: command.root_path,
-        metadata_dir: command.metadata_dir,
-        targets_dir: command.targets_dir,
-        datastore_dir: command.datastore_dir,
-        target_name: command.target_name.clone(),
-    });
+    let request = match command.source {
+        ConfigVerifyBundleSource::Local {
+            metadata_dir,
+            targets_dir,
+        } => TufConfigTargetRequest::Local(LocalTufConfigTargetRequest {
+            root_path: command.root_path,
+            metadata_dir,
+            targets_dir,
+            datastore_dir: command.datastore_dir,
+            target_name: command.target_name.clone(),
+        }),
+        ConfigVerifyBundleSource::Remote {
+            metadata_base_url,
+            targets_base_url,
+            allow_dev_insecure_fetch_urls,
+        } => TufConfigTargetRequest::Remote(RemoteTufConfigTargetRequest {
+            root_path: command.root_path,
+            metadata_base_url,
+            targets_base_url,
+            datastore_dir: command.datastore_dir,
+            target_name: command.target_name.clone(),
+            allow_dev_insecure_fetch_urls,
+        }),
+    };
     let resolved = resolve_tuf_config_candidate(&request, &current_config).await?;
     authorize_signed_config_candidate(&resolved, &current_config)?;
     let (_candidate, provenance) = parse_candidate_config_with_provenance(
@@ -483,8 +516,11 @@ fn parse_config_verify_bundle_command(args: &[String]) -> Result<CliCommand, Cli
     let mut root_path: Option<PathBuf> = None;
     let mut metadata_dir: Option<PathBuf> = None;
     let mut targets_dir: Option<PathBuf> = None;
+    let mut metadata_base_url: Option<String> = None;
+    let mut targets_base_url: Option<String> = None;
     let mut datastore_dir: Option<PathBuf> = None;
     let mut target_name: Option<String> = None;
+    let mut allow_dev_insecure_fetch_urls = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -508,6 +544,16 @@ fn parse_config_verify_bundle_command(args: &[String]) -> Result<CliCommand, Cli
         } else if arg == TARGETS_DIR_FLAG {
             index += 1;
             targets_dir = Some(required_path_arg(args, index, TARGETS_DIR_FLAG)?);
+        } else if let Some(value) = flag_value(arg, METADATA_BASE_URL_FLAG) {
+            metadata_base_url = Some(required_string_value(METADATA_BASE_URL_FLAG, value)?);
+        } else if arg == METADATA_BASE_URL_FLAG {
+            index += 1;
+            metadata_base_url = Some(required_string_arg(args, index, METADATA_BASE_URL_FLAG)?);
+        } else if let Some(value) = flag_value(arg, TARGETS_BASE_URL_FLAG) {
+            targets_base_url = Some(required_string_value(TARGETS_BASE_URL_FLAG, value)?);
+        } else if arg == TARGETS_BASE_URL_FLAG {
+            index += 1;
+            targets_base_url = Some(required_string_arg(args, index, TARGETS_BASE_URL_FLAG)?);
         } else if let Some(value) = flag_value(arg, DATASTORE_DIR_FLAG) {
             datastore_dir = Some(required_path_value(DATASTORE_DIR_FLAG, value)?);
         } else if arg == DATASTORE_DIR_FLAG {
@@ -518,6 +564,8 @@ fn parse_config_verify_bundle_command(args: &[String]) -> Result<CliCommand, Cli
         } else if arg == TARGET_NAME_FLAG {
             index += 1;
             target_name = Some(required_string_arg(args, index, TARGET_NAME_FLAG)?);
+        } else if arg == ALLOW_DEV_INSECURE_FETCH_URLS_FLAG {
+            allow_dev_insecure_fetch_urls = true;
         } else {
             return Err(CliError(format!(
                 "unknown {CONFIG_COMMAND} {VERIFY_BUNDLE_COMMAND} argument: {arg}"
@@ -526,13 +574,33 @@ fn parse_config_verify_bundle_command(args: &[String]) -> Result<CliCommand, Cli
         index += 1;
     }
 
+    let uses_local_source = metadata_dir.is_some() || targets_dir.is_some();
+    let uses_remote_source =
+        metadata_base_url.is_some() || targets_base_url.is_some() || allow_dev_insecure_fetch_urls;
+    if uses_local_source && uses_remote_source {
+        return Err(CliError(
+            "local and remote TUF repository flags cannot be mixed".to_string(),
+        ));
+    }
+    let source = if uses_remote_source {
+        ConfigVerifyBundleSource::Remote {
+            metadata_base_url: require_flag(metadata_base_url, METADATA_BASE_URL_FLAG)?,
+            targets_base_url: require_flag(targets_base_url, TARGETS_BASE_URL_FLAG)?,
+            allow_dev_insecure_fetch_urls,
+        }
+    } else {
+        ConfigVerifyBundleSource::Local {
+            metadata_dir: require_flag(metadata_dir, METADATA_DIR_FLAG)?,
+            targets_dir: require_flag(targets_dir, TARGETS_DIR_FLAG)?,
+        }
+    };
+
     Ok(CliCommand::ConfigVerifyBundle(ConfigVerifyBundleCommand {
         config_path: config_path.unwrap_or_else(default_config_path_from_env),
         root_path: require_flag(root_path, ROOT_PATH_FLAG)?,
-        metadata_dir: require_flag(metadata_dir, METADATA_DIR_FLAG)?,
-        targets_dir: require_flag(targets_dir, TARGETS_DIR_FLAG)?,
         datastore_dir: require_flag(datastore_dir, DATASTORE_DIR_FLAG)?,
         target_name: require_flag(target_name, TARGET_NAME_FLAG)?,
+        source,
     }))
 }
 
@@ -921,7 +989,8 @@ async fn shutdown_signal() {
 mod tests {
     use super::{
         build_audit_sink, compile_relay_runtime, parse_cli_command_from, run_healthcheck,
-        CliCommand, OperationalLogFormat, DEFAULT_HEALTHCHECK_TIMEOUT_MS, DEFAULT_HEALTHCHECK_URL,
+        CliCommand, ConfigVerifyBundleSource, OperationalLogFormat, DEFAULT_HEALTHCHECK_TIMEOUT_MS,
+        DEFAULT_HEALTHCHECK_URL,
     };
     use axum::routing::get;
     use axum::Router;
@@ -1137,18 +1206,89 @@ audit:
             std::path::PathBuf::from("/etc/registry-relay/tuf/root.json")
         );
         assert_eq!(
-            command.metadata_dir,
-            std::path::PathBuf::from("/etc/registry-relay/tuf/metadata")
+            command.datastore_dir,
+            std::path::PathBuf::from("/var/lib/registry-relay/tuf")
+        );
+        assert_eq!(command.target_name, "registry-relay.yaml");
+        assert_eq!(
+            command.source,
+            ConfigVerifyBundleSource::Local {
+                metadata_dir: std::path::PathBuf::from("/etc/registry-relay/tuf/metadata"),
+                targets_dir: std::path::PathBuf::from("/etc/registry-relay/tuf/targets"),
+            }
+        );
+    }
+
+    #[test]
+    fn config_verify_bundle_cli_accepts_remote_tuf_flags() {
+        let command = parse_cli_command_from(command_args(&[
+            "registry-relay",
+            "config",
+            "verify-bundle",
+            "--config",
+            "/etc/registry-relay/current.yaml",
+            "--root-path",
+            "/etc/registry-relay/tuf/root.json",
+            "--metadata-base-url=https://config.example.test/metadata",
+            "--targets-base-url",
+            "https://config.example.test/targets",
+            "--datastore-dir=/var/lib/registry-relay/tuf",
+            "--target-name",
+            "registry-relay.yaml",
+            "--allow-dev-insecure-fetch-urls",
+        ]))
+        .expect("config verify-bundle command parses");
+
+        let CliCommand::ConfigVerifyBundle(command) = command else {
+            panic!("expected config verify-bundle command");
+        };
+        assert_eq!(
+            command.config_path,
+            std::path::PathBuf::from("/etc/registry-relay/current.yaml")
         );
         assert_eq!(
-            command.targets_dir,
-            std::path::PathBuf::from("/etc/registry-relay/tuf/targets")
+            command.root_path,
+            std::path::PathBuf::from("/etc/registry-relay/tuf/root.json")
         );
         assert_eq!(
             command.datastore_dir,
             std::path::PathBuf::from("/var/lib/registry-relay/tuf")
         );
         assert_eq!(command.target_name, "registry-relay.yaml");
+        assert_eq!(
+            command.source,
+            ConfigVerifyBundleSource::Remote {
+                metadata_base_url: "https://config.example.test/metadata".to_string(),
+                targets_base_url: "https://config.example.test/targets".to_string(),
+                allow_dev_insecure_fetch_urls: true,
+            }
+        );
+    }
+
+    #[test]
+    fn config_verify_bundle_cli_rejects_mixed_local_and_remote_tuf_flags() {
+        let err = parse_cli_command_from(command_args(&[
+            "registry-relay",
+            "config",
+            "verify-bundle",
+            "--config",
+            "/etc/registry-relay/current.yaml",
+            "--root-path",
+            "/etc/registry-relay/tuf/root.json",
+            "--metadata-dir=/etc/registry-relay/tuf/metadata",
+            "--targets-dir=/etc/registry-relay/tuf/targets",
+            "--metadata-base-url=https://config.example.test/metadata",
+            "--targets-base-url=https://config.example.test/targets",
+            "--datastore-dir=/var/lib/registry-relay/tuf",
+            "--target-name",
+            "registry-relay.yaml",
+        ]))
+        .expect_err("mixed source flags fail");
+
+        assert_eq!(
+            err.to_string(),
+            "local and remote TUF repository flags cannot be mixed"
+        );
     }
 
     #[test]

@@ -14,6 +14,8 @@ use tough::editor::signed::PathExists;
 use tough::editor::RepositoryEditor;
 use tough::key_source::{KeySource, LocalKeySource};
 use tough::schema::Target;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TUF_TARGETS_SIGNER_KID: &str =
     "8ec3a843a0f9328c863cac4046ab1cacbbc67888476ac7acf73d9bcd9a223ada";
@@ -239,6 +241,66 @@ fn verify_bundle_command(config_path: &Path, signed: &SignedConfigFixture) -> Co
     command
 }
 
+fn remote_verify_bundle_command(
+    config_path: &Path,
+    signed: &SignedConfigFixture,
+    server: &MockServer,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_registry-relay"));
+    command
+        .arg("config")
+        .arg("verify-bundle")
+        .arg("--config")
+        .arg(config_path)
+        .arg("--root-path")
+        .arg(&signed.root_path)
+        .arg("--metadata-base-url")
+        .arg(format!("{}/metadata", server.uri()))
+        .arg("--targets-base-url")
+        .arg(format!("{}/targets", server.uri()))
+        .arg("--datastore-dir")
+        .arg(&signed.datastore_dir)
+        .arg("--target-name")
+        .arg(&signed.target_name)
+        .arg("--allow-dev-insecure-fetch-urls");
+    command
+}
+
+async fn serve_signed_tuf_fixture(signed: &SignedConfigFixture) -> MockServer {
+    let server = MockServer::start().await;
+    mount_directory_files(&server, "/metadata", &signed.metadata_dir).await;
+    mount_directory_files(&server, "/targets", &signed.targets_dir).await;
+    Mock::given(method("GET"))
+        .and(path("/metadata/2.root.json"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mount_directory_files(server: &MockServer, url_prefix: &str, dir: &Path) {
+    for entry in std::fs::read_dir(dir).expect("directory reads") {
+        let entry = entry.expect("directory entry reads");
+        let path_on_disk = entry.path();
+        if !path_on_disk.is_file() {
+            continue;
+        }
+        let filename = path_on_disk
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("fixture filename is UTF-8");
+        Mock::given(method("GET"))
+            .and(path(format!("{url_prefix}/{filename}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(
+                    std::fs::read(path_on_disk).expect("generated repo file reads"),
+                ),
+            )
+            .mount(server)
+            .await;
+    }
+}
+
 #[tokio::test]
 async fn config_verify_bundle_cli_reports_verified_signed_bundle() {
     let tmp = TempDir::new().expect("tempdir");
@@ -269,6 +331,65 @@ async fn config_verify_bundle_cli_reports_verified_signed_bundle() {
     assert_eq!(
         report["config_hash"],
         internal_config_hash(candidate_yaml.as_bytes())
+    );
+}
+
+#[tokio::test]
+async fn config_verify_bundle_cli_reports_verified_remote_signed_bundle() {
+    let tmp = TempDir::new().expect("tempdir");
+    let current_config = write_current_config(&tmp, TUF_TARGETS_SIGNER_KID);
+    let candidate_yaml = candidate_config_yaml(&tmp);
+    let signed = write_signed_config_tuf_fixture(&tmp, &candidate_yaml).await;
+    let server = serve_signed_tuf_fixture(&signed).await;
+
+    let output = remote_verify_bundle_command(&current_config, &signed, &server)
+        .output()
+        .expect("verify-bundle command runs");
+
+    assert!(
+        output.status.success(),
+        "verify-bundle failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value =
+        serde_json::from_slice(&output.stdout).expect("verify-bundle emits JSON report");
+    assert_eq!(report["result"], "verified");
+    assert_eq!(report["source"], "signed_bundle_endpoint");
+    assert_eq!(report["bundle_id"], "test-bundle");
+    assert_eq!(report["stream_id"], "test-stream");
+    assert_eq!(report["sequence"], 1);
+    assert_eq!(report["target_name"], signed.target_name);
+    assert_eq!(report["change_classes"], json!(["public_metadata"]));
+    assert_eq!(report["signer_kids"], json!([TUF_TARGETS_SIGNER_KID]));
+    assert_eq!(
+        report["config_hash"],
+        internal_config_hash(candidate_yaml.as_bytes())
+    );
+}
+
+#[tokio::test]
+async fn config_verify_bundle_cli_rejects_mixed_local_and_remote_flags() {
+    let tmp = TempDir::new().expect("tempdir");
+    let current_config = write_current_config(&tmp, TUF_TARGETS_SIGNER_KID);
+    let candidate_yaml = candidate_config_yaml(&tmp);
+    let signed = write_signed_config_tuf_fixture(&tmp, &candidate_yaml).await;
+    let server = serve_signed_tuf_fixture(&signed).await;
+
+    let mut command = remote_verify_bundle_command(&current_config, &signed, &server);
+    command.arg("--metadata-dir").arg(&signed.metadata_dir);
+    let output = command.output().expect("verify-bundle command runs");
+
+    assert!(
+        !output.status.success(),
+        "verify-bundle unexpectedly succeeded: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("local and remote TUF repository flags cannot be mixed"),
+        "stderr did not explain mixed source failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
