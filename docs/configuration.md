@@ -82,6 +82,7 @@ config_trust:
       valid_until_unix_seconds: 1772592000
       high_risk_change_classes:
         - auth_scopes
+        - signing_key_cleanup
         - signing_key_rotation
       signers:
         TUF_TARGETS_ROLE_KEY_ID_A:

@@ -240,7 +240,11 @@ async fn config_verify(
             )
         }
     };
-    let compatible = match classify_live_config_change(&current, &candidate) {
+    let compatible = match classify_live_config_change(
+        &current,
+        &candidate,
+        live_change_authorization(&resolved),
+    ) {
         Ok(LiveConfigChange::Compatible { .. }) => true,
         Ok(LiveConfigChange::RestartRequired) => false,
         Err(detail) => {
@@ -378,7 +382,11 @@ async fn config_dry_run(
             )
         }
     };
-    let compatible = match classify_live_config_change(&current, &candidate) {
+    let compatible = match classify_live_config_change(
+        &current,
+        &candidate,
+        live_change_authorization(&resolved),
+    ) {
         Ok(LiveConfigChange::Compatible { .. }) => true,
         Ok(LiveConfigChange::RestartRequired) => false,
         Err(detail) => {
@@ -581,7 +589,11 @@ async fn config_apply(
             )
         }
     };
-    let live_change = match classify_live_config_change(&current, &candidate) {
+    let live_change = match classify_live_config_change(
+        &current,
+        &candidate,
+        live_change_authorization(&resolved),
+    ) {
         Ok(change) => change,
         Err(detail) => {
             return with_config_audit(
@@ -1112,9 +1124,23 @@ enum LiveConfigChange {
     RestartRequired,
 }
 
+#[derive(Clone, Copy)]
+struct LiveChangeAuthorization {
+    signing_key_rotation: bool,
+    signing_key_cleanup: bool,
+}
+
+fn live_change_authorization(candidate: &ResolvedConfigCandidate) -> LiveChangeAuthorization {
+    LiveChangeAuthorization {
+        signing_key_rotation: candidate.change_classes.contains("signing_key_rotation"),
+        signing_key_cleanup: candidate.change_classes.contains("signing_key_cleanup"),
+    }
+}
+
 fn classify_live_config_change(
     current: &crate::runtime_config::RelayRuntimeSnapshot,
     candidate: &Config,
+    authorization: LiveChangeAuthorization,
 ) -> Result<LiveConfigChange, &'static str> {
     if is_metadata_only_config_change(&current.config, candidate) {
         return Ok(LiveConfigChange::Compatible {
@@ -1130,6 +1156,25 @@ fn classify_live_config_change(
     let resolved = build_resolved_provenance_config(candidate.provenance.as_ref())
         .map_err(|_| "candidate provenance could not be resolved")?
         .ok_or("candidate provenance could not be resolved")?;
+    let active_key_changed =
+        current_state.config().verification_method_id != resolved.verification_method_id;
+    if active_key_changed && !authorization.signing_key_rotation {
+        return Ok(LiveConfigChange::RestartRequired);
+    }
+    let removed_retired_keys = removed_retired_key_ids(current_state.config(), &resolved);
+    if !removed_retired_keys.is_empty() && !authorization.signing_key_cleanup {
+        return Ok(LiveConfigChange::RestartRequired);
+    }
+    if retired_keys_added_or_changed(current_state.config(), &resolved)
+        && !authorization.signing_key_rotation
+    {
+        return Ok(LiveConfigChange::RestartRequired);
+    }
+    reject_unexpired_retired_key_cleanup(
+        current_state.config(),
+        &removed_retired_keys,
+        (current_state.clock)(),
+    )?;
     if current_state.config().verification_method_id != resolved.verification_method_id
         && !resolved
             .retired_keys
@@ -1151,6 +1196,73 @@ fn classify_live_config_change(
             current_state.clock,
         ))),
     })
+}
+
+fn removed_retired_key_ids(
+    current: &crate::provenance::ResolvedProvenanceConfig,
+    candidate: &crate::provenance::ResolvedProvenanceConfig,
+) -> BTreeSet<String> {
+    let candidate_ids = candidate
+        .retired_keys
+        .iter()
+        .map(|key| key.verification_method_id.as_str())
+        .collect::<BTreeSet<_>>();
+    current
+        .retired_keys
+        .iter()
+        .filter(|key| !candidate_ids.contains(key.verification_method_id.as_str()))
+        .map(|key| key.verification_method_id.clone())
+        .collect()
+}
+
+fn retired_keys_added_or_changed(
+    current: &crate::provenance::ResolvedProvenanceConfig,
+    candidate: &crate::provenance::ResolvedProvenanceConfig,
+) -> bool {
+    candidate.retired_keys.iter().any(|candidate_key| {
+        current
+            .retired_keys
+            .iter()
+            .find(|current_key| {
+                current_key.verification_method_id == candidate_key.verification_method_id
+            })
+            .is_none_or(|current_key| {
+                current_key.public_jwk != candidate_key.public_jwk
+                    || current_key.retired_after != candidate_key.retired_after
+            })
+    })
+}
+
+fn reject_unexpired_retired_key_cleanup(
+    current: &crate::provenance::ResolvedProvenanceConfig,
+    removed_retired_key_ids: &BTreeSet<String>,
+    now: OffsetDateTime,
+) -> Result<(), &'static str> {
+    if removed_retired_key_ids.is_empty() {
+        return Ok(());
+    }
+    let max_validity = current
+        .claim_validity
+        .aggregate_result
+        .max(current.claim_validity.entity_record);
+    let grace = time::Duration::try_from(max_validity + std::time::Duration::from_secs(300))
+        .unwrap_or(time::Duration::MAX);
+    for key in &current.retired_keys {
+        if !removed_retired_key_ids.contains(&key.verification_method_id) {
+            continue;
+        }
+        let expired = key
+            .retired_after
+            .checked_add(grace)
+            .map(|cutoff| now > cutoff)
+            .unwrap_or(false);
+        if !expired {
+            return Err(
+                "candidate provenance cleanup removed retired key before verification window expired",
+            );
+        }
+    }
+    Ok(())
 }
 
 fn is_provenance_signing_rotation_change(current: &Config, candidate: &Config) -> bool {

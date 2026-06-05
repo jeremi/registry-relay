@@ -199,7 +199,7 @@ Rotation procedure (gateway mode):
 4. Update `verification_method_id` to the new id and point the signer at the new material (`signer.jwk_env` for `software`, or the configured JWK file for `file_watch`).
 5. Roll the gateway for local-file startup config changes. With governed signed config apply, Relay can live-apply an active provenance key-id flip when provenance was already enabled, issuer identity and route-affecting settings are unchanged, new local signer material is ready, and the old key is published in `retired_keys`. With `file_watch`, replacing file contents without a config change is only a same-public-key refresh; a different public key under the same `verification_method_id` is rejected so older VCs remain verifiable through the retired-key flow.
 6. Confirm the new VCs verify with the new public JWK and that previously issued VCs (still inside their validity window) verify against the retired entry.
-7. Once the longest applicable `claim_validity` window has elapsed since `retired_after`, drop the retired entry from config and remove the public JWK from the DID Document on the next deploy.
+7. Once the longest applicable `claim_validity` window plus five minutes has elapsed since `retired_after`, drop the retired entry from config. Governed signed apply uses change class `signing_key_cleanup`; local-file startup config removes it on the next deploy.
 
 Delegated mode follows the same steps, except the DID Document edits land on the ministry's side. Coordinate the cutover so the ministry publishes the new `verificationMethod` before the gateway starts signing with the corresponding private key.
 

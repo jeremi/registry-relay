@@ -203,6 +203,7 @@ config_trust:
             - kid-b
           allowed_change_classes:
             - public_metadata
+            - signing_key_cleanup
             - signing_key_rotation
             - emergency_break_glass
 "#,
@@ -1694,6 +1695,309 @@ async fn config_apply_signed_provenance_rotation_swaps_runtime_snapshot() {
         "ready"
     );
     assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+}
+
+#[tokio::test]
+async fn config_apply_signed_provenance_cleanup_removes_expired_retired_key() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(&tmp);
+    let active_key_path = tmp.path().join("provenance-active.jwk");
+    let active_kid = "did:web:data.example.test#relay-public-key";
+    write_ed25519_jwk(&active_key_path, active_kid);
+    let retired_kid = "did:web:data.example.test#relay-public-key-old";
+    let retired_key_path = tmp.path().join("provenance-retired.jwk");
+    let retired_public_jwk = write_ed25519_jwk(&retired_key_path, retired_kid);
+    let retired_after = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+    unsafe {
+        std::env::set_var(
+            "REGISTRY_RELAY_RETIRED_PROVENANCE_JWK",
+            serde_json::to_string(&retired_public_jwk).expect("retired public jwk serializes"),
+        );
+    }
+    let retired_block = format!(
+        "signing_algorithm: EdDSA\n    retired_keys:\n      - verification_method_id: {retired_kid}\n        jwk_env: REGISTRY_RELAY_RETIRED_PROVENANCE_JWK\n        retired_after: {retired_after}\n"
+    );
+    let yaml = std::fs::read_to_string(&config_path)
+        .expect("config reads")
+        .replace("enabled: false", "enabled: true")
+        .replace(
+            "kind: software\n      jwk_env: REGISTRY_RELAY_TEST_PRIVATE_JWK\n      signing_algorithm: EdDSA",
+            &format!(
+                "kind: file_watch\n      path: \"{}\"\n      {retired_block}",
+                active_key_path.to_string_lossy()
+            ),
+        );
+    std::fs::write(&config_path, yaml).expect("config writes");
+    let fixture = build_fixture_from_config_path_with_provenance_state(tmp, config_path, true);
+
+    let candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace(&retired_block, "signing_algorithm: EdDSA\n");
+    let signed = write_signed_config_tuf_fixture_with_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+        &["signing_key_cleanup"],
+    )
+    .await;
+
+    let response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        signed_tuf_apply_request(&signed),
+        ADMIN_KEY,
+    )
+    .await;
+    response.assert_status(StatusCode::OK);
+    let body: Value = response.json();
+    assert_eq!(body["result"], "applied");
+    assert_eq!(body["restart_required"], false);
+
+    let posture = fixture
+        .server
+        .get("/admin/v1/posture?tier=restricted")
+        .add_header("Authorization", format!("Bearer {OPS_KEY}"))
+        .await;
+    posture.assert_status(StatusCode::OK);
+    let posture: Value = posture.json();
+    assert_eq!(posture["relay"]["provenance"]["active_kid"], active_kid);
+    assert_eq!(posture["relay"]["provenance"]["retired_kids"], json!([]));
+    assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+}
+
+#[tokio::test]
+async fn config_apply_signed_provenance_cleanup_rejects_unexpired_retired_key() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(&tmp);
+    let active_key_path = tmp.path().join("provenance-active.jwk");
+    let active_kid = "did:web:data.example.test#relay-public-key";
+    write_ed25519_jwk(&active_key_path, active_kid);
+    let retired_kid = "did:web:data.example.test#relay-public-key-old";
+    let retired_key_path = tmp.path().join("provenance-retired.jwk");
+    let retired_public_jwk = write_ed25519_jwk(&retired_key_path, retired_kid);
+    let retired_after = Utc::now().to_rfc3339();
+    unsafe {
+        std::env::set_var(
+            "REGISTRY_RELAY_RETIRED_PROVENANCE_JWK",
+            serde_json::to_string(&retired_public_jwk).expect("retired public jwk serializes"),
+        );
+    }
+    let retired_block = format!(
+        "signing_algorithm: EdDSA\n    retired_keys:\n      - verification_method_id: {retired_kid}\n        jwk_env: REGISTRY_RELAY_RETIRED_PROVENANCE_JWK\n        retired_after: {retired_after}\n"
+    );
+    let yaml = std::fs::read_to_string(&config_path)
+        .expect("config reads")
+        .replace("enabled: false", "enabled: true")
+        .replace(
+            "kind: software\n      jwk_env: REGISTRY_RELAY_TEST_PRIVATE_JWK\n      signing_algorithm: EdDSA",
+            &format!(
+                "kind: file_watch\n      path: \"{}\"\n      {retired_block}",
+                active_key_path.to_string_lossy()
+            ),
+        );
+    std::fs::write(&config_path, yaml).expect("config writes");
+    let fixture = build_fixture_from_config_path_with_provenance_state(tmp, config_path, true);
+
+    let candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace(&retired_block, "signing_algorithm: EdDSA\n");
+    let signed = write_signed_config_tuf_fixture_with_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+        &["signing_key_cleanup"],
+    )
+    .await;
+
+    let response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        signed_tuf_apply_request(&signed),
+        ADMIN_KEY,
+    )
+    .await;
+    let body = assert_problem(
+        response,
+        StatusCode::BAD_REQUEST,
+        "admin.config_candidate_invalid",
+    )
+    .await;
+    assert_eq!(
+        body["detail"],
+        "candidate provenance cleanup removed retired key before verification window expired"
+    );
+
+    let posture = fixture
+        .server
+        .get("/admin/v1/posture?tier=restricted")
+        .add_header("Authorization", format!("Bearer {OPS_KEY}"))
+        .await;
+    posture.assert_status(StatusCode::OK);
+    let posture: Value = posture.json();
+    assert_eq!(posture["relay"]["provenance"]["active_kid"], active_kid);
+    assert_eq!(
+        posture["relay"]["provenance"]["retired_kids"],
+        json!([retired_kid])
+    );
+    assert_eq!(posture["configuration"]["last_apply_result"], Value::Null);
+}
+
+#[tokio::test]
+async fn config_apply_signed_provenance_cleanup_class_cannot_rotate_active_key() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(&tmp);
+    let old_key_path = tmp.path().join("provenance-old.jwk");
+    let old_kid = "did:web:data.example.test#relay-public-key";
+    let old_public_jwk = write_ed25519_jwk(&old_key_path, old_kid);
+    let yaml = std::fs::read_to_string(&config_path)
+        .expect("config reads")
+        .replace("enabled: false", "enabled: true")
+        .replace(
+            "kind: software\n      jwk_env: REGISTRY_RELAY_TEST_PRIVATE_JWK\n      signing_algorithm: EdDSA",
+            &format!(
+                "kind: file_watch\n      path: \"{}\"\n      signing_algorithm: EdDSA",
+                old_key_path.to_string_lossy()
+            ),
+        );
+    std::fs::write(&config_path, yaml).expect("config writes");
+    let fixture = build_fixture_from_config_path_with_provenance_state(tmp, config_path, true);
+
+    let new_key_path = fixture._tmp.path().join("provenance-new.jwk");
+    let new_kid = "did:web:data.example.test#relay-public-key-2";
+    write_ed25519_jwk(&new_key_path, new_kid);
+    unsafe {
+        std::env::set_var(
+            "REGISTRY_RELAY_RETIRED_PROVENANCE_JWK",
+            serde_json::to_string(&old_public_jwk).expect("old public jwk serializes"),
+        );
+    }
+    let candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace(
+            "verification_method_id: did:web:data.example.test#relay-public-key\n    signer:\n      kind: file_watch",
+            "verification_method_id: did:web:data.example.test#relay-public-key-2\n    signer:\n      kind: file_watch",
+        )
+        .replace(
+            &format!("path: \"{}\"", old_key_path.to_string_lossy()),
+            &format!("path: \"{}\"", new_key_path.to_string_lossy()),
+        )
+        .replace(
+            "signing_algorithm: EdDSA\n",
+            "signing_algorithm: EdDSA\n    retired_keys:\n      - verification_method_id: did:web:data.example.test#relay-public-key\n        jwk_env: REGISTRY_RELAY_RETIRED_PROVENANCE_JWK\n        retired_after: 2026-06-05T00:00:00Z\n",
+        );
+    let signed = write_signed_config_tuf_fixture_with_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+        &["signing_key_cleanup"],
+    )
+    .await;
+
+    let response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        signed_tuf_apply_request(&signed),
+        ADMIN_KEY,
+    )
+    .await;
+
+    response.assert_status(StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(body["result"], "rejected_restart_required");
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["restart_required"], true);
+
+    let posture = fixture
+        .server
+        .get("/admin/v1/posture?tier=restricted")
+        .add_header("Authorization", format!("Bearer {OPS_KEY}"))
+        .await;
+    posture.assert_status(StatusCode::OK);
+    let posture: Value = posture.json();
+    assert_eq!(posture["relay"]["provenance"]["active_kid"], old_kid);
+    assert_eq!(posture["relay"]["provenance"]["retired_kids"], json!([]));
+    assert_eq!(posture["configuration"]["last_apply_result"], Value::Null);
+}
+
+#[tokio::test]
+async fn config_apply_signed_provenance_rotation_class_cannot_cleanup_retired_key() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(&tmp);
+    let active_key_path = tmp.path().join("provenance-active.jwk");
+    let active_kid = "did:web:data.example.test#relay-public-key";
+    write_ed25519_jwk(&active_key_path, active_kid);
+    let retired_kid = "did:web:data.example.test#relay-public-key-old";
+    let retired_key_path = tmp.path().join("provenance-retired.jwk");
+    let retired_public_jwk = write_ed25519_jwk(&retired_key_path, retired_kid);
+    let retired_after = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+    unsafe {
+        std::env::set_var(
+            "REGISTRY_RELAY_RETIRED_PROVENANCE_JWK",
+            serde_json::to_string(&retired_public_jwk).expect("retired public jwk serializes"),
+        );
+    }
+    let retired_block = format!(
+        "signing_algorithm: EdDSA\n    retired_keys:\n      - verification_method_id: {retired_kid}\n        jwk_env: REGISTRY_RELAY_RETIRED_PROVENANCE_JWK\n        retired_after: {retired_after}\n"
+    );
+    let yaml = std::fs::read_to_string(&config_path)
+        .expect("config reads")
+        .replace("enabled: false", "enabled: true")
+        .replace(
+            "kind: software\n      jwk_env: REGISTRY_RELAY_TEST_PRIVATE_JWK\n      signing_algorithm: EdDSA",
+            &format!(
+                "kind: file_watch\n      path: \"{}\"\n      {retired_block}",
+                active_key_path.to_string_lossy()
+            ),
+        );
+    std::fs::write(&config_path, yaml).expect("config writes");
+    let fixture = build_fixture_from_config_path_with_provenance_state(tmp, config_path, true);
+
+    let candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace(&retired_block, "signing_algorithm: EdDSA\n");
+    let signed = write_signed_config_tuf_fixture_with_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+        &["signing_key_rotation"],
+    )
+    .await;
+
+    let response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        signed_tuf_apply_request(&signed),
+        ADMIN_KEY,
+    )
+    .await;
+
+    response.assert_status(StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(body["result"], "rejected_restart_required");
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["restart_required"], true);
+
+    let posture = fixture
+        .server
+        .get("/admin/v1/posture?tier=restricted")
+        .add_header("Authorization", format!("Bearer {OPS_KEY}"))
+        .await;
+    posture.assert_status(StatusCode::OK);
+    let posture: Value = posture.json();
+    assert_eq!(posture["relay"]["provenance"]["active_kid"], active_kid);
+    assert_eq!(
+        posture["relay"]["provenance"]["retired_kids"],
+        json!([retired_kid])
+    );
+    assert_eq!(posture["configuration"]["last_apply_result"], Value::Null);
 }
 
 #[tokio::test]

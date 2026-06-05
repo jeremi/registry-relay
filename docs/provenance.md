@@ -379,8 +379,10 @@ var (`software`) or a local JWK file (`file_watch`). To rotate:
    new local signer material is ready, and the old key is published in
    `retired_keys`.
 7. Once the retirement cutoff has passed, drop the entry from
-   `retired_keys` and remove the public JWK from the DID Document on
-   the next rolling deploy.
+   `retired_keys`. With governed signed config apply, use change class
+   `signing_key_cleanup`; Relay rejects cleanup before
+   `retired_after + max(claim_validity) + 5m`. With local-file startup config,
+   remove the entry on the next rolling deploy.
 
 Never check a private JWK into git, into config, or into a container
 image. Never log it, never include it in error messages, and never
