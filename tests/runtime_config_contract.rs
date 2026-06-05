@@ -30,6 +30,22 @@ fn legacy_runtime_extension_extractors_stay_removed_from_handlers() {
     );
 }
 
+#[test]
+fn runtime_snapshot_documents_sub_arc_across_await_guard() {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime_config.rs"))
+            .expect("runtime_config.rs reads");
+
+    assert!(
+        source.contains("does not hold cloned sub-component `Arc`s across await points"),
+        "RuntimeSnapshot must document the sub-Arc-across-await guard before new live-apply surfaces are certified"
+    );
+    assert!(
+        source.contains("stale-state regression test promotes them"),
+        "captured-state components must stay restart-required until they have stale-state regression coverage"
+    );
+}
+
 fn is_legacy_handler_surface(path: &Path) -> bool {
     let relative = path
         .strip_prefix(env!("CARGO_MANIFEST_DIR"))

@@ -244,6 +244,13 @@ impl RelayRuntimeHandle {
 
 /// Request extractor that reads the current runtime snapshot through the
 /// swappable runtime handle.
+///
+/// Live-apply code may treat an accessor as hot-swappable only when it is
+/// documented in the runtime component classification contract and the caller
+/// does not hold cloned sub-component `Arc`s across await points as if they
+/// would refresh independently. Components with captured state, such as query
+/// engines and the DataFusion context, stay restart-required until a dedicated
+/// stale-state regression test promotes them.
 pub struct RuntimeSnapshot {
     handle: Option<Arc<RelayRuntimeHandle>>,
     snapshot: Option<Arc<RelayRuntimeSnapshot>>,
