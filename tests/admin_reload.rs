@@ -37,6 +37,8 @@ use tough::editor::signed::PathExists;
 use tough::editor::RepositoryEditor;
 use tough::key_source::LocalKeySource;
 use tough::schema::Target;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const ADMIN_KEY: &str = "admin-test-token-0123456789";
 const NON_ADMIN_KEY: &str = "non-admin-test-token-0123456789";
@@ -765,6 +767,54 @@ fn signed_tuf_apply_request(signed: &SignedConfigFixture) -> Value {
     })
 }
 
+fn remote_signed_tuf_apply_request(signed: &SignedConfigFixture, server: &MockServer) -> Value {
+    json!({
+        "tuf": {
+            "root_path": signed.root_path,
+            "metadata_base_url": format!("{}/metadata", server.uri()),
+            "targets_base_url": format!("{}/targets", server.uri()),
+            "datastore_dir": signed.datastore_dir,
+            "target_name": signed.target_name,
+            "allow_dev_insecure_fetch_urls": true,
+        }
+    })
+}
+
+async fn serve_signed_tuf_fixture(signed: &SignedConfigFixture) -> MockServer {
+    let server = MockServer::start().await;
+    mount_directory_files(&server, "/metadata", &signed.metadata_dir).await;
+    mount_directory_files(&server, "/targets", &signed.targets_dir).await;
+    Mock::given(method("GET"))
+        .and(path("/metadata/2.root.json"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mount_directory_files(server: &MockServer, url_prefix: &str, dir: &Path) {
+    for entry in std::fs::read_dir(dir).expect("directory reads") {
+        let entry = entry.expect("directory entry reads");
+        let path_on_disk = entry.path();
+        if !path_on_disk.is_file() {
+            continue;
+        }
+        let filename = path_on_disk
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("fixture filename is UTF-8");
+        Mock::given(method("GET"))
+            .and(path(format!("{url_prefix}/{filename}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(
+                    std::fs::read(path_on_disk).expect("generated repo file reads"),
+                ),
+            )
+            .mount(server)
+            .await;
+    }
+}
+
 fn break_glass_approval() -> Value {
     let expires_at_unix_seconds = Utc::now().timestamp() as u64 + 3600;
     json!({
@@ -1069,6 +1119,10 @@ async fn config_dry_run_reports_restart_required_without_swapping() {
     posture.assert_status(StatusCode::OK);
     let posture: Value = posture.json();
     assert_eq!(posture["configuration"]["last_apply_result"], Value::Null);
+
+    let record = config_audit_record(&fixture, "/admin/v1/config/dry-run");
+    assert_eq!(record["config"]["action"], "dry_run");
+    assert_eq!(record["config"]["source"], "local_file");
 }
 
 #[tokio::test]
@@ -1903,6 +1957,69 @@ async fn config_apply_signed_tuf_target_swaps_runtime_snapshot() {
     assert!(!audit_text.contains("registry-relay.yaml"));
     assert!(!audit_text.contains("signed-config-5"));
     assert!(!audit_text.contains("private-jwk-material"));
+}
+
+#[tokio::test]
+async fn config_apply_remote_signed_tuf_target_swaps_runtime_snapshot() {
+    let fixture = build_fixture();
+    let candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace("owner: Test Ministry", "owner: Remote Signed Ministry");
+    let signed = write_signed_config_tuf_fixture(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+    )
+    .await;
+    let server = serve_signed_tuf_fixture(&signed).await;
+
+    let response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        remote_signed_tuf_apply_request(&signed, &server),
+        ADMIN_KEY,
+    )
+    .await;
+
+    if response.status_code() != StatusCode::OK {
+        let body: Value = response.json();
+        panic!("remote signed TUF apply should succeed, got {body:#}");
+    }
+    let body: Value = response.json();
+    assert_eq!(body["bundle_id"], "test-bundle");
+    assert_eq!(body["sequence"], 5);
+    assert_eq!(body["result"], "applied");
+    assert_eq!(body["posture_result"], "accepted");
+    assert_eq!(body["applied"], true);
+    assert_eq!(body["restart_required"], false);
+
+    let posture = fixture
+        .server
+        .get("/admin/v1/posture")
+        .add_header("Authorization", format!("Bearer {OPS_KEY}"))
+        .await;
+    posture.assert_status(StatusCode::OK);
+    let posture: Value = posture.json();
+    assert_matches_posture_schema(&posture);
+    assert_eq!(posture["instance"]["owner"], "Remote Signed Ministry");
+    assert_eq!(posture["configuration"]["source"], "signed_bundle_endpoint");
+    assert_eq!(posture["configuration"]["last_bundle_id"], "test-bundle");
+    assert_eq!(posture["configuration"]["last_bundle_sequence"], 5);
+    assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+
+    let record = config_audit_record(&fixture, "/admin/v1/config/apply");
+    let config_audit = &record["config"];
+    assert_eq!(config_audit["action"], "apply");
+    assert_eq!(config_audit["source"], "signed_bundle_endpoint");
+    assert_eq!(config_audit["bundle_id"], "test-bundle");
+    assert_eq!(config_audit["bundle_sequence"], 5);
+    assert_eq!(config_audit["signer_kids"], json!([TUF_TARGETS_SIGNER_KID]));
+    assert_eq!(config_audit["apply_result"], "applied");
+    assert_eq!(config_audit["posture_result"], "accepted");
+    assert_eq!(config_audit["applied"], true);
+    assert_eq!(config_audit["restart_required"], false);
 }
 
 #[tokio::test]

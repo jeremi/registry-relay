@@ -298,7 +298,7 @@ POST /admin/v1/config/apply
 }
 ```
 
-`apply` requires a signed TUF target and rejects inline config with `admin.config_apply_unavailable`. The signed target request shape is:
+`apply` requires a signed TUF target and rejects inline config with `admin.config_apply_unavailable`. The local signed target request shape is:
 
 ```json
 {
@@ -311,6 +311,26 @@ POST /admin/v1/config/apply
   }
 }
 ```
+
+The remote signed target request shape uses the same trusted root and durable
+datastore, but fetches TUF metadata and targets from guarded base URLs:
+
+```json
+{
+  "tuf": {
+    "root_path": "/etc/registry-relay/trust/root.json",
+    "metadata_base_url": "https://config.example.gov/registry-relay/metadata/",
+    "targets_base_url": "https://config.example.gov/registry-relay/targets/",
+    "datastore_dir": "/var/lib/registry-relay/config-tuf",
+    "target_name": "registry-relay.yaml"
+  }
+}
+```
+
+Remote sources are recorded as `signed_bundle_endpoint`; local repository
+sources are recorded as `signed_bundle_file`. The default remote URL policy
+requires safe HTTPS endpoints. HTTP loopback is accepted only with
+`allow_dev_insecure_fetch_urls: true` for tests and local development.
 
 Break-glass requests are apply-only and must include all current fields:
 

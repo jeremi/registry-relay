@@ -16,7 +16,9 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use registry_manifest_core::CompiledMetadata;
 use registry_platform_config::RegistryTrustRoot;
-use registry_platform_config::{LocalTufRepositoryInput, TufConfigVerifier, VerificationContext};
+use registry_platform_config::{
+    LocalTufRepositoryInput, RemoteTufRepositoryInput, TufConfigVerifier, VerificationContext,
+};
 use registry_platform_crypto::{KeyProviderKind, KeyReadiness};
 use registry_platform_ops::{
     filter_posture_for_tier, internal_config_hash, posture_safe_runtime_config_hash,
@@ -89,16 +91,36 @@ struct ConfigApplyRequest {
     #[serde(default)]
     config_yaml: Option<String>,
     #[serde(default)]
-    tuf: Option<LocalTufConfigTargetRequest>,
+    tuf: Option<TufConfigTargetRequest>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TufConfigTargetRequest {
+    Local(LocalTufConfigTargetRequest),
+    Remote(RemoteTufConfigTargetRequest),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LocalTufConfigTargetRequest {
     root_path: PathBuf,
     metadata_dir: PathBuf,
     targets_dir: PathBuf,
     datastore_dir: PathBuf,
     target_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteTufConfigTargetRequest {
+    root_path: PathBuf,
+    metadata_base_url: String,
+    targets_base_url: String,
+    datastore_dir: PathBuf,
+    target_name: String,
+    #[serde(default)]
+    allow_dev_insecure_fetch_urls: bool,
 }
 
 struct ResolvedConfigCandidate {
@@ -493,7 +515,7 @@ async fn config_apply(
             )
         }
     };
-    if resolved.source != ConfigSource::SignedBundleFile {
+    if !is_signed_config_source(resolved.source) {
         let requested_break_glass = request.break_glass
             || request.break_glass_approval.is_some()
             || request.break_glass_rate_limit.is_some();
@@ -1041,13 +1063,8 @@ fn build_posture(
 }
 
 fn parse_candidate_config(config_yaml: &str) -> Result<Config, &'static str> {
-    parse_candidate_config_with_provenance(
-        config_yaml,
-        "dry-run",
-        0,
-        ConfigSource::SignedBundleEndpoint,
-    )
-    .map(|(config, _)| config)
+    parse_candidate_config_with_provenance(config_yaml, "dry-run", 0, ConfigSource::LocalFile)
+        .map(|(config, _)| config)
 }
 
 async fn resolve_config_candidate(
@@ -1081,7 +1098,7 @@ async fn resolve_config_candidate(
                 signer_kids: BTreeSet::new(),
                 tuf_root_sha256: None,
                 config_yaml: config_yaml.clone(),
-                source: ConfigSource::SignedBundleEndpoint,
+                source: ConfigSource::LocalFile,
             })
         }
         (None, Some(tuf)) => resolve_tuf_config_candidate(tuf, current_config).await,
@@ -1092,7 +1109,7 @@ async fn resolve_config_candidate(
 }
 
 async fn resolve_tuf_config_candidate(
-    request: &LocalTufConfigTargetRequest,
+    request: &TufConfigTargetRequest,
     current_config: &Config,
 ) -> Result<ResolvedConfigCandidate, ConfigCandidateError> {
     let environment = current_config
@@ -1105,18 +1122,43 @@ async fn resolve_tuf_config_candidate(
         instance_id: current_config.instance.id.clone(),
         environment,
     };
-    let input = LocalTufRepositoryInput {
-        root_path: request.root_path.clone(),
-        metadata_dir: request.metadata_dir.clone(),
-        targets_dir: request.targets_dir.clone(),
-        datastore_dir: request.datastore_dir.clone(),
-        target_name: request.target_name.clone(),
+    let (verified, source) = match request {
+        TufConfigTargetRequest::Local(request) => {
+            let input = LocalTufRepositoryInput {
+                root_path: request.root_path.clone(),
+                metadata_dir: request.metadata_dir.clone(),
+                targets_dir: request.targets_dir.clone(),
+                datastore_dir: request.datastore_dir.clone(),
+                target_name: request.target_name.clone(),
+            };
+            let verified = TufConfigVerifier::verify_config_target(&input, &context)
+                .await
+                .map_err(|_| {
+                    ConfigCandidateError::BundleInvalid(
+                        "signed config target could not be verified",
+                    )
+                })?;
+            (verified, ConfigSource::SignedBundleFile)
+        }
+        TufConfigTargetRequest::Remote(request) => {
+            let input = RemoteTufRepositoryInput {
+                root_path: request.root_path.clone(),
+                metadata_base_url: request.metadata_base_url.clone(),
+                targets_base_url: request.targets_base_url.clone(),
+                datastore_dir: request.datastore_dir.clone(),
+                target_name: request.target_name.clone(),
+                allow_dev_insecure_fetch_urls: request.allow_dev_insecure_fetch_urls,
+            };
+            let verified = TufConfigVerifier::verify_remote_config_target(&input, &context)
+                .await
+                .map_err(|_| {
+                    ConfigCandidateError::BundleInvalid(
+                        "signed config target could not be verified",
+                    )
+                })?;
+            (verified, ConfigSource::SignedBundleEndpoint)
+        }
     };
-    let verified = TufConfigVerifier::verify_config_target(&input, &context)
-        .await
-        .map_err(|_| {
-            ConfigCandidateError::BundleInvalid("signed config target could not be verified")
-        })?;
     let config_yaml = String::from_utf8(verified.tuf.target_bytes).map_err(|_| {
         ConfigCandidateError::CandidateInvalid("candidate config payload is not valid UTF-8")
     })?;
@@ -1130,7 +1172,7 @@ async fn resolve_tuf_config_candidate(
         signer_kids: verified.tuf.signer_kids.into_iter().collect(),
         tuf_root_sha256: Some(verified.tuf.root_sha256),
         config_yaml,
-        source: ConfigSource::SignedBundleFile,
+        source,
     })
 }
 
@@ -1138,7 +1180,7 @@ fn authorize_signed_config_candidate(
     candidate: &ResolvedConfigCandidate,
     current_config: &Config,
 ) -> Result<(), ConfigCandidateError> {
-    if candidate.source != ConfigSource::SignedBundleFile {
+    if !is_signed_config_source(candidate.source) {
         return Ok(());
     }
     let Some(config_trust) = &current_config.config_trust else {
@@ -1169,6 +1211,13 @@ fn authorize_signed_config_candidate(
             "signed config target was not authorized by local trust roots",
         ))
     }
+}
+
+fn is_signed_config_source(source: ConfigSource) -> bool {
+    matches!(
+        source,
+        ConfigSource::SignedBundleFile | ConfigSource::SignedBundleEndpoint
+    )
 }
 
 fn parse_candidate_config_with_provenance(
@@ -1714,8 +1763,11 @@ impl ConfigAuditLocalApprovalExt for ConfigAuditExt {
 }
 
 fn request_config_source(request: &ConfigApplyRequest) -> ConfigSource {
-    if request.tuf.is_some() {
-        ConfigSource::SignedBundleFile
+    if let Some(tuf) = &request.tuf {
+        match tuf {
+            TufConfigTargetRequest::Local(_) => ConfigSource::SignedBundleFile,
+            TufConfigTargetRequest::Remote(_) => ConfigSource::SignedBundleEndpoint,
+        }
     } else if request.config_yaml.is_some() {
         ConfigSource::LocalFile
     } else {
@@ -2106,4 +2158,29 @@ fn posture_filter_failed(error: PostureFilterError) -> Response {
         .extensions_mut()
         .insert(ErrorCodeExt(POSTURE_FILTER_FAILED_CODE.to_string()));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_request_rejects_ambiguous_local_and_remote_tuf_source() {
+        let request = serde_json::from_value::<ConfigApplyRequest>(json!({
+            "tuf": {
+                "root_path": "/etc/registry-relay/trust/root.json",
+                "metadata_dir": "/etc/registry-relay/trust/metadata",
+                "targets_dir": "/etc/registry-relay/trust/targets",
+                "metadata_base_url": "https://config.example.gov/metadata/",
+                "targets_base_url": "https://config.example.gov/targets/",
+                "datastore_dir": "/var/lib/registry-relay/config-tuf",
+                "target_name": "registry-relay.yaml"
+            }
+        }));
+
+        assert!(
+            request.is_err(),
+            "TUF request must choose exactly one local or remote source shape"
+        );
+    }
 }
