@@ -18,6 +18,8 @@ use tough::editor::signed::PathExists;
 use tough::editor::RepositoryEditor;
 use tough::key_source::{KeySource, LocalKeySource};
 use tough::schema::Target;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const ADMIN_TOKEN: &str = "relay-live-admin-token";
 const OPS_TOKEN: &str = "relay-live-ops-token";
@@ -360,6 +362,72 @@ fn local_apply_bundle_command(server: &LiveRelayServer, signed: &SignedConfigFix
     command
 }
 
+fn remote_apply_bundle_command(
+    server: &LiveRelayServer,
+    signed: &SignedConfigFixture,
+    remote: &MockServer,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_registry-relay"));
+    command
+        .arg("config")
+        .arg("apply-bundle")
+        .arg("--admin-url")
+        .arg(&server.admin_url)
+        .arg("--admin-token-env")
+        .arg(ADMIN_TOKEN_ENV)
+        .arg("--root-path")
+        .arg(&signed.root_path)
+        .arg("--metadata-base-url")
+        .arg(format!("{}/metadata", remote.uri()))
+        .arg("--targets-base-url")
+        .arg(format!("{}/targets", remote.uri()))
+        .arg("--datastore-dir")
+        .arg(&signed.datastore_dir)
+        .arg("--target-name")
+        .arg(&signed.target_name)
+        .arg("--allow-dev-insecure-fetch-urls")
+        .arg("--local-approval-reference")
+        .arg("ROOT-2026-Q2")
+        .env(ADMIN_TOKEN_ENV, ADMIN_TOKEN)
+        .env_remove("REGISTRY_RELAY_CONFIG");
+    command
+}
+
+async fn serve_signed_tuf_fixture(signed: &SignedConfigFixture) -> MockServer {
+    let server = MockServer::start().await;
+    mount_directory_files(&server, "/metadata", &signed.metadata_dir).await;
+    mount_directory_files(&server, "/targets", &signed.targets_dir).await;
+    Mock::given(method("GET"))
+        .and(path("/metadata/2.root.json"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn mount_directory_files(server: &MockServer, url_prefix: &str, dir: &Path) {
+    for entry in std::fs::read_dir(dir).expect("directory reads") {
+        let entry = entry.expect("directory entry reads");
+        let path_on_disk = entry.path();
+        if !path_on_disk.is_file() {
+            continue;
+        }
+        let filename = path_on_disk
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("fixture filename is UTF-8");
+        Mock::given(method("GET"))
+            .and(path(format!("{url_prefix}/{filename}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(
+                    std::fs::read(path_on_disk).expect("generated repo file reads"),
+                ),
+            )
+            .mount(server)
+            .await;
+    }
+}
+
 #[tokio::test]
 async fn config_apply_bundle_cli_drives_live_admin_root_transition_with_local_approval() {
     #[allow(unused_unsafe)]
@@ -422,6 +490,98 @@ async fn config_apply_bundle_cli_drives_live_admin_root_transition_with_local_ap
         .await
         .expect("posture response is JSON");
     assert_eq!(posture["configuration"]["source"], "signed_bundle_file");
+    assert_eq!(
+        posture["configuration"]["last_bundle_id"],
+        "relay-root-transition-bundle"
+    );
+    assert_eq!(posture["configuration"]["last_bundle_sequence"], 2);
+    assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+    assert_eq!(posture["configuration"]["restart_required"], false);
+
+    let antirollback = FileAntiRollbackStore::new(&antirollback_path)
+        .load(&AntiRollbackKey {
+            product: "registry-relay".to_string(),
+            instance_id: "relay-live-cli".to_string(),
+            environment: "lab".to_string(),
+            stream_id: "test-stream".to_string(),
+        })
+        .expect("antirollback state loads");
+    assert_eq!(antirollback.last_sequence, 2);
+    assert_eq!(antirollback.last_config_hash, candidate_hash);
+    assert_eq!(antirollback.local_approvals.accepted.len(), 1);
+    assert_eq!(
+        antirollback.local_approvals.accepted[0].approval_reference,
+        "ROOT-2026-Q2"
+    );
+    assert_eq!(
+        antirollback.local_approvals.accepted[0].change_class,
+        "root_transition"
+    );
+}
+
+#[tokio::test]
+async fn config_apply_bundle_cli_drives_live_admin_remote_root_transition_with_local_approval() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(ADMIN_TOKEN_HASH_ENV, fingerprint_api_key(ADMIN_TOKEN));
+        std::env::set_var(OPS_TOKEN_HASH_ENV, fingerprint_api_key(OPS_TOKEN));
+        std::env::set_var(AUDIT_HASH_SECRET_ENV, AUDIT_HASH_SECRET);
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let public_bind = allocate_loopback_addr();
+    let admin_bind = allocate_loopback_addr();
+    let current_yaml = current_config_yaml(&tmp, public_bind, admin_bind);
+    let current_config_path = tmp.path().join("current.yaml");
+    std::fs::write(&current_config_path, &current_yaml).expect("current config writes");
+    registry_relay::config::load(&current_config_path).expect("current config validates");
+    let current_config_hash = internal_config_hash(current_yaml.as_bytes());
+    let antirollback_path = tmp.path().join("antirollback.json");
+    initialize_antirollback_state(&antirollback_path, &current_config_hash);
+
+    let candidate_yaml = candidate_config_yaml(&tmp, public_bind, admin_bind);
+    let candidate_hash = internal_config_hash(candidate_yaml.as_bytes());
+    write_local_approval(&tmp, &candidate_hash, &current_config_hash);
+    let signed =
+        write_signed_root_transition_fixture(&tmp, &current_config_hash, &candidate_yaml).await;
+    let remote = serve_signed_tuf_fixture(&signed).await;
+    let server = start_live_relay(&current_config_path, admin_bind).await;
+
+    let output = remote_apply_bundle_command(&server, &signed, &remote)
+        .output()
+        .expect("live remote root transition apply-bundle command runs");
+
+    assert!(
+        output.status.success(),
+        "live remote root transition apply-bundle failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("apply-bundle emits server JSON");
+    assert_eq!(response["result"], "applied");
+    assert_eq!(response["bundle_id"], "relay-root-transition-bundle");
+    assert_eq!(response["applied"], true);
+    assert_eq!(response["restart_required"], false);
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("posture client builds");
+    let posture: Value = client
+        .get(format!(
+            "{}/admin/v1/posture?tier=restricted",
+            server.admin_url
+        ))
+        .bearer_auth(OPS_TOKEN)
+        .send()
+        .await
+        .expect("posture request succeeds")
+        .error_for_status()
+        .expect("posture response succeeds")
+        .json()
+        .await
+        .expect("posture response is JSON");
+    assert_eq!(posture["configuration"]["source"], "signed_bundle_endpoint");
     assert_eq!(
         posture["configuration"]["last_bundle_id"],
         "relay-root-transition-bundle"
