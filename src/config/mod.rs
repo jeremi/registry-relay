@@ -27,6 +27,7 @@ use registry_platform_config::RegistryTrustRoot;
 use serde::{Deserialize, Serialize};
 
 pub mod capabilities;
+pub mod governed;
 pub mod loader;
 pub mod provenance;
 pub mod validate;

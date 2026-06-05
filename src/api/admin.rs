@@ -6,7 +6,6 @@
 //! listener when that wiring lands.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query};
@@ -16,9 +15,6 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use registry_manifest_core::CompiledMetadata;
 use registry_platform_config::RegistryTrustRoot;
-use registry_platform_config::{
-    LocalTufRepositoryInput, RemoteTufRepositoryInput, TufConfigVerifier, VerificationContext,
-};
 use registry_platform_crypto::{KeyProviderKind, KeyReadiness};
 use registry_platform_ops::{
     filter_posture_for_tier, internal_config_hash, posture_safe_runtime_config_hash,
@@ -35,8 +31,13 @@ use tokio::sync::watch;
 use crate::audit::{ConfigAuditExt, ErrorCodeExt};
 use crate::auth::scopes::require_scope;
 use crate::auth::Principal;
+use crate::config::governed::{
+    authorize_signed_config_candidate, is_signed_config_source,
+    parse_candidate_config_with_provenance, resolve_tuf_config_candidate, ConfigCandidateError,
+    ResolvedConfigCandidate, TufConfigTargetRequest,
+};
 use crate::config::{
-    self, AuthMode, Config, DatasetId, IssuerConfig, ProvenanceConfig, ResourceId, SignerConfig,
+    AuthMode, Config, DatasetId, IssuerConfig, ProvenanceConfig, ResourceId, SignerConfig,
 };
 use crate::error::{AdminError, AuthError, Error, IngestError};
 use crate::ingest::{IngestRegistry, ReadinessSnapshot};
@@ -123,48 +124,6 @@ struct ConfigApplyRequest {
     config_yaml: Option<String>,
     #[serde(default)]
     tuf: Option<TufConfigTargetRequest>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum TufConfigTargetRequest {
-    Local(LocalTufConfigTargetRequest),
-    Remote(RemoteTufConfigTargetRequest),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LocalTufConfigTargetRequest {
-    root_path: PathBuf,
-    metadata_dir: PathBuf,
-    targets_dir: PathBuf,
-    datastore_dir: PathBuf,
-    target_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemoteTufConfigTargetRequest {
-    root_path: PathBuf,
-    metadata_base_url: String,
-    targets_base_url: String,
-    datastore_dir: PathBuf,
-    target_name: String,
-    #[serde(default)]
-    allow_dev_insecure_fetch_urls: bool,
-}
-
-struct ResolvedConfigCandidate {
-    bundle_id: String,
-    stream_id: String,
-    sequence: u64,
-    previous_config_hash: Option<String>,
-    root_version: Option<u64>,
-    change_classes: BTreeSet<String>,
-    signer_kids: BTreeSet<String>,
-    tuf_root_sha256: Option<String>,
-    config_yaml: String,
-    source: ConfigSource,
 }
 
 #[derive(Debug, Serialize)]
@@ -918,11 +877,6 @@ fn default_stream_id() -> String {
     "default".to_string()
 }
 
-enum ConfigCandidateError {
-    CandidateInvalid(&'static str),
-    BundleInvalid(&'static str),
-}
-
 #[derive(Debug, Deserialize)]
 struct ReloadTablePath {
     dataset_id: DatasetId,
@@ -1161,146 +1115,6 @@ async fn resolve_config_candidate(
             "candidate config source was not provided",
         )),
     }
-}
-
-async fn resolve_tuf_config_candidate(
-    request: &TufConfigTargetRequest,
-    current_config: &Config,
-) -> Result<ResolvedConfigCandidate, ConfigCandidateError> {
-    let environment = current_config
-        .instance
-        .environment
-        .clone()
-        .unwrap_or_else(|| "development".to_string());
-    let context = VerificationContext {
-        product: "registry-relay".to_string(),
-        instance_id: current_config.instance.id.clone(),
-        environment,
-    };
-    let (verified, source) = match request {
-        TufConfigTargetRequest::Local(request) => {
-            let input = LocalTufRepositoryInput {
-                root_path: request.root_path.clone(),
-                metadata_dir: request.metadata_dir.clone(),
-                targets_dir: request.targets_dir.clone(),
-                datastore_dir: request.datastore_dir.clone(),
-                target_name: request.target_name.clone(),
-            };
-            let verified = TufConfigVerifier::verify_config_target(&input, &context)
-                .await
-                .map_err(|_| {
-                    ConfigCandidateError::BundleInvalid(
-                        "signed config target could not be verified",
-                    )
-                })?;
-            (verified, ConfigSource::SignedBundleFile)
-        }
-        TufConfigTargetRequest::Remote(request) => {
-            let input = RemoteTufRepositoryInput {
-                root_path: request.root_path.clone(),
-                metadata_base_url: request.metadata_base_url.clone(),
-                targets_base_url: request.targets_base_url.clone(),
-                datastore_dir: request.datastore_dir.clone(),
-                target_name: request.target_name.clone(),
-                allow_dev_insecure_fetch_urls: request.allow_dev_insecure_fetch_urls,
-            };
-            let verified = TufConfigVerifier::verify_remote_config_target(&input, &context)
-                .await
-                .map_err(|_| {
-                    ConfigCandidateError::BundleInvalid(
-                        "signed config target could not be verified",
-                    )
-                })?;
-            (verified, ConfigSource::SignedBundleEndpoint)
-        }
-    };
-    let config_yaml = String::from_utf8(verified.tuf.target_bytes).map_err(|_| {
-        ConfigCandidateError::CandidateInvalid("candidate config payload is not valid UTF-8")
-    })?;
-    Ok(ResolvedConfigCandidate {
-        bundle_id: verified.metadata.bundle_id,
-        stream_id: verified.metadata.stream_id,
-        sequence: verified.metadata.sequence,
-        previous_config_hash: verified.metadata.previous_config_hash,
-        root_version: Some(verified.tuf.root_version),
-        change_classes: verified.metadata.change_classes,
-        signer_kids: verified.tuf.signer_kids.into_iter().collect(),
-        tuf_root_sha256: Some(verified.tuf.root_sha256),
-        config_yaml,
-        source,
-    })
-}
-
-fn authorize_signed_config_candidate(
-    candidate: &ResolvedConfigCandidate,
-    current_config: &Config,
-) -> Result<(), ConfigCandidateError> {
-    if !is_signed_config_source(candidate.source) {
-        return Ok(());
-    }
-    let Some(config_trust) = &current_config.config_trust else {
-        return Err(ConfigCandidateError::BundleInvalid(
-            "signed config trust roots are not configured",
-        ));
-    };
-    if config_trust.accepted_roots.is_empty() {
-        return Err(ConfigCandidateError::BundleInvalid(
-            "signed config trust roots are not configured",
-        ));
-    }
-    let signer_kids = candidate.signer_kids.iter().cloned().collect::<Vec<_>>();
-    if config_trust.accepted_roots.iter().any(|root| {
-        root.authorize(
-            &candidate.change_classes,
-            &signer_kids,
-            candidate
-                .tuf_root_sha256
-                .as_deref()
-                .unwrap_or("sha256:missing"),
-        )
-        .is_ok()
-    }) {
-        Ok(())
-    } else {
-        Err(ConfigCandidateError::BundleInvalid(
-            "signed config target was not authorized by local trust roots",
-        ))
-    }
-}
-
-fn is_signed_config_source(source: ConfigSource) -> bool {
-    matches!(
-        source,
-        ConfigSource::SignedBundleFile | ConfigSource::SignedBundleEndpoint
-    )
-}
-
-fn parse_candidate_config_with_provenance(
-    config_yaml: &str,
-    bundle_id: &str,
-    sequence: u64,
-    source: ConfigSource,
-) -> Result<(Config, ConfigProvenance), &'static str> {
-    let config_value: Value =
-        serde_saphyr::from_str(config_yaml).map_err(|_| "candidate config could not be parsed")?;
-    let config: Config =
-        serde_saphyr::from_str(config_yaml).map_err(|_| "candidate config could not be parsed")?;
-    config::validate::run(&config).map_err(|_| "candidate config did not validate")?;
-    let mut provenance = ConfigProvenance {
-        source,
-        internal_config_hash: internal_config_hash(config_yaml.as_bytes()),
-        posture_config_hash: posture_safe_runtime_config_hash(&config_value),
-        dynamic_reload_supported: true,
-        last_bundle_id: Some(bundle_id.to_string()),
-        last_bundle_sequence: Some(sequence),
-        last_apply_result: None,
-        last_apply_at: None,
-        restart_required: false,
-    };
-    if bundle_id.trim().is_empty() {
-        provenance.last_bundle_id = None;
-    }
-    Ok((config, provenance))
 }
 
 fn is_metadata_only_config_change(current: &Config, candidate: &Config) -> bool {

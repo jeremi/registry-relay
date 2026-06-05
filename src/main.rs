@@ -44,6 +44,10 @@ use registry_relay::auth::api_key::{ApiKeyAuth, ApiKeyEntry};
 use registry_relay::auth::middleware::AuthProviderRef;
 use registry_relay::auth::oidc::{OidcAuth, ReqwestJwksFetcher};
 use registry_relay::auth::ScopeSet;
+use registry_relay::config::governed::{
+    authorize_signed_config_candidate, parse_candidate_config_with_provenance,
+    resolve_tuf_config_candidate, LocalTufConfigTargetRequest, TufConfigTargetRequest,
+};
 use registry_relay::config::{self, ApiKeyConfig, AuditSinkConfig, Config, OidcConfig};
 use registry_relay::entity::EntityRegistry;
 use registry_relay::error::{ConfigError, Error};
@@ -59,6 +63,7 @@ use registry_relay::runtime_config::{RelayRuntimeHandle, RelayRuntimeSnapshot};
 use registry_relay::serve::{serve_listener, ServeLimits};
 #[cfg(feature = "spdci-api-standards")]
 use registry_relay::spdci::build_spdci_response_mapper;
+use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -70,6 +75,12 @@ const CONFIG_FLAG: &str = "--config";
 
 /// Top-level command for shell-free container liveness probing.
 const HEALTHCHECK_COMMAND: &str = "healthcheck";
+
+/// Top-level namespace for operator configuration commands.
+const CONFIG_COMMAND: &str = "config";
+
+/// Verifies a signed governed-config target without applying it.
+const VERIFY_BUNDLE_COMMAND: &str = "verify-bundle";
 
 /// Healthcheck target override flag.
 const HEALTHCHECK_URL_FLAG: &str = "--url";
@@ -86,10 +97,27 @@ const DEFAULT_HEALTHCHECK_TIMEOUT_MS: u64 = 5_000;
 /// Last-resort default config path.
 const DEFAULT_CONFIG_PATH: &str = "./config/example.yaml";
 
+const ROOT_PATH_FLAG: &str = "--root-path";
+const METADATA_DIR_FLAG: &str = "--metadata-dir";
+const TARGETS_DIR_FLAG: &str = "--targets-dir";
+const DATASTORE_DIR_FLAG: &str = "--datastore-dir";
+const TARGET_NAME_FLAG: &str = "--target-name";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
     Serve { config_path: PathBuf },
     Healthcheck { url: String, timeout: Duration },
+    ConfigVerifyBundle(ConfigVerifyBundleCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigVerifyBundleCommand {
+    config_path: PathBuf,
+    root_path: PathBuf,
+    metadata_dir: PathBuf,
+    targets_dir: PathBuf,
+    datastore_dir: PathBuf,
+    target_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +176,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             println!("registry-relay healthcheck ok");
             Ok(())
         }
+        CliCommand::ConfigVerifyBundle(command) => run_config_verify_bundle(command).await,
     }
 }
 
@@ -257,6 +286,64 @@ async fn run_server(config_path: PathBuf) -> Result<(), Box<dyn std::error::Erro
     }
 
     result
+}
+
+async fn run_config_verify_bundle(
+    command: ConfigVerifyBundleCommand,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let loaded = config::load_with_metadata(&command.config_path)?;
+    let current_config = loaded.runtime;
+    let request = TufConfigTargetRequest::Local(LocalTufConfigTargetRequest {
+        root_path: command.root_path,
+        metadata_dir: command.metadata_dir,
+        targets_dir: command.targets_dir,
+        datastore_dir: command.datastore_dir,
+        target_name: command.target_name.clone(),
+    });
+    let resolved = resolve_tuf_config_candidate(&request, &current_config).await?;
+    authorize_signed_config_candidate(&resolved, &current_config)?;
+    let (_candidate, provenance) = parse_candidate_config_with_provenance(
+        &resolved.config_yaml,
+        &resolved.bundle_id,
+        resolved.sequence,
+        resolved.source,
+    )
+    .map_err(|detail| io::Error::new(io::ErrorKind::InvalidData, detail))?;
+
+    let report = VerifyBundleReport {
+        result: "verified",
+        source: resolved.source.as_posture_str(),
+        target_name: command.target_name,
+        bundle_id: resolved.bundle_id,
+        stream_id: resolved.stream_id,
+        sequence: resolved.sequence,
+        previous_config_hash: resolved.previous_config_hash,
+        config_hash: provenance.internal_config_hash,
+        posture_config_hash: provenance.posture_config_hash,
+        root_version: resolved.root_version,
+        tuf_root_sha256: resolved.tuf_root_sha256,
+        change_classes: resolved.change_classes.into_iter().collect(),
+        signer_kids: resolved.signer_kids.into_iter().collect(),
+    };
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct VerifyBundleReport {
+    result: &'static str,
+    source: &'static str,
+    target_name: String,
+    bundle_id: String,
+    stream_id: String,
+    sequence: u64,
+    previous_config_hash: Option<String>,
+    config_hash: String,
+    posture_config_hash: String,
+    root_version: Option<u64>,
+    tuf_root_sha256: Option<String>,
+    change_classes: Vec<String>,
+    signer_kids: Vec<String>,
 }
 
 async fn compile_relay_runtime(
@@ -370,11 +457,119 @@ fn parse_cli_command_from(args: Vec<String>) -> Result<CliCommand, CliError> {
     let rest: Vec<String> = args.collect();
     if rest.first().is_some_and(|arg| arg == HEALTHCHECK_COMMAND) {
         parse_healthcheck_command(&rest[1..])
+    } else if rest.first().is_some_and(|arg| arg == CONFIG_COMMAND) {
+        parse_config_command(&rest[1..])
     } else {
         Ok(CliCommand::Serve {
             config_path: resolve_config_path_from(rest),
         })
     }
+}
+
+fn parse_config_command(args: &[String]) -> Result<CliCommand, CliError> {
+    let Some(command) = args.first() else {
+        return Err(CliError(format!("{CONFIG_COMMAND} requires a subcommand")));
+    };
+    match command.as_str() {
+        VERIFY_BUNDLE_COMMAND => parse_config_verify_bundle_command(&args[1..]),
+        _ => Err(CliError(format!(
+            "unknown {CONFIG_COMMAND} subcommand: {command}"
+        ))),
+    }
+}
+
+fn parse_config_verify_bundle_command(args: &[String]) -> Result<CliCommand, CliError> {
+    let mut config_path: Option<PathBuf> = None;
+    let mut root_path: Option<PathBuf> = None;
+    let mut metadata_dir: Option<PathBuf> = None;
+    let mut targets_dir: Option<PathBuf> = None;
+    let mut datastore_dir: Option<PathBuf> = None;
+    let mut target_name: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = flag_value(arg, CONFIG_FLAG) {
+            config_path = Some(required_path_value(CONFIG_FLAG, value)?);
+        } else if arg == CONFIG_FLAG {
+            index += 1;
+            config_path = Some(required_path_arg(args, index, CONFIG_FLAG)?);
+        } else if let Some(value) = flag_value(arg, ROOT_PATH_FLAG) {
+            root_path = Some(required_path_value(ROOT_PATH_FLAG, value)?);
+        } else if arg == ROOT_PATH_FLAG {
+            index += 1;
+            root_path = Some(required_path_arg(args, index, ROOT_PATH_FLAG)?);
+        } else if let Some(value) = flag_value(arg, METADATA_DIR_FLAG) {
+            metadata_dir = Some(required_path_value(METADATA_DIR_FLAG, value)?);
+        } else if arg == METADATA_DIR_FLAG {
+            index += 1;
+            metadata_dir = Some(required_path_arg(args, index, METADATA_DIR_FLAG)?);
+        } else if let Some(value) = flag_value(arg, TARGETS_DIR_FLAG) {
+            targets_dir = Some(required_path_value(TARGETS_DIR_FLAG, value)?);
+        } else if arg == TARGETS_DIR_FLAG {
+            index += 1;
+            targets_dir = Some(required_path_arg(args, index, TARGETS_DIR_FLAG)?);
+        } else if let Some(value) = flag_value(arg, DATASTORE_DIR_FLAG) {
+            datastore_dir = Some(required_path_value(DATASTORE_DIR_FLAG, value)?);
+        } else if arg == DATASTORE_DIR_FLAG {
+            index += 1;
+            datastore_dir = Some(required_path_arg(args, index, DATASTORE_DIR_FLAG)?);
+        } else if let Some(value) = flag_value(arg, TARGET_NAME_FLAG) {
+            target_name = Some(required_string_value(TARGET_NAME_FLAG, value)?);
+        } else if arg == TARGET_NAME_FLAG {
+            index += 1;
+            target_name = Some(required_string_arg(args, index, TARGET_NAME_FLAG)?);
+        } else {
+            return Err(CliError(format!(
+                "unknown {CONFIG_COMMAND} {VERIFY_BUNDLE_COMMAND} argument: {arg}"
+            )));
+        }
+        index += 1;
+    }
+
+    Ok(CliCommand::ConfigVerifyBundle(ConfigVerifyBundleCommand {
+        config_path: config_path.unwrap_or_else(default_config_path_from_env),
+        root_path: require_flag(root_path, ROOT_PATH_FLAG)?,
+        metadata_dir: require_flag(metadata_dir, METADATA_DIR_FLAG)?,
+        targets_dir: require_flag(targets_dir, TARGETS_DIR_FLAG)?,
+        datastore_dir: require_flag(datastore_dir, DATASTORE_DIR_FLAG)?,
+        target_name: require_flag(target_name, TARGET_NAME_FLAG)?,
+    }))
+}
+
+fn flag_value<'a>(arg: &'a str, flag: &str) -> Option<&'a str> {
+    arg.strip_prefix(&format!("{flag}="))
+}
+
+fn required_path_arg(args: &[String], index: usize, flag: &str) -> Result<PathBuf, CliError> {
+    let Some(value) = args.get(index) else {
+        return Err(CliError(format!("{flag} requires a non-empty path")));
+    };
+    required_path_value(flag, value)
+}
+
+fn required_path_value(flag: &str, value: &str) -> Result<PathBuf, CliError> {
+    if value.is_empty() {
+        return Err(CliError(format!("{flag} requires a non-empty path")));
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn required_string_arg(args: &[String], index: usize, flag: &str) -> Result<String, CliError> {
+    let Some(value) = args.get(index) else {
+        return Err(CliError(format!("{flag} requires a non-empty value")));
+    };
+    required_string_value(flag, value)
+}
+
+fn required_string_value(flag: &str, value: &str) -> Result<String, CliError> {
+    if value.is_empty() {
+        return Err(CliError(format!("{flag} requires a non-empty value")));
+    }
+    Ok(value.to_string())
+}
+
+fn require_flag<T>(value: Option<T>, flag: &str) -> Result<T, CliError> {
+    value.ok_or_else(|| CliError(format!("{flag} is required")))
 }
 
 fn parse_healthcheck_command(args: &[String]) -> Result<CliCommand, CliError> {
@@ -456,6 +651,15 @@ fn resolve_config_path_from(args: Vec<String>) -> PathBuf {
             return PathBuf::from(rest);
         }
     }
+    if let Ok(p) = env::var("REGISTRY_RELAY_CONFIG") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    PathBuf::from(DEFAULT_CONFIG_PATH)
+}
+
+fn default_config_path_from_env() -> PathBuf {
     if let Ok(p) = env::var("REGISTRY_RELAY_CONFIG") {
         if !p.is_empty() {
             return PathBuf::from(p);
@@ -900,6 +1104,82 @@ audit:
             config_path,
             std::path::PathBuf::from("/etc/registry-relay/config.yaml")
         );
+    }
+
+    #[test]
+    fn config_verify_bundle_cli_accepts_local_tuf_flags() {
+        let command = parse_cli_command_from(command_args(&[
+            "registry-relay",
+            "config",
+            "verify-bundle",
+            "--config",
+            "/etc/registry-relay/current.yaml",
+            "--root-path",
+            "/etc/registry-relay/tuf/root.json",
+            "--metadata-dir=/etc/registry-relay/tuf/metadata",
+            "--targets-dir",
+            "/etc/registry-relay/tuf/targets",
+            "--datastore-dir=/var/lib/registry-relay/tuf",
+            "--target-name",
+            "registry-relay.yaml",
+        ]))
+        .expect("config verify-bundle command parses");
+
+        let CliCommand::ConfigVerifyBundle(command) = command else {
+            panic!("expected config verify-bundle command");
+        };
+        assert_eq!(
+            command.config_path,
+            std::path::PathBuf::from("/etc/registry-relay/current.yaml")
+        );
+        assert_eq!(
+            command.root_path,
+            std::path::PathBuf::from("/etc/registry-relay/tuf/root.json")
+        );
+        assert_eq!(
+            command.metadata_dir,
+            std::path::PathBuf::from("/etc/registry-relay/tuf/metadata")
+        );
+        assert_eq!(
+            command.targets_dir,
+            std::path::PathBuf::from("/etc/registry-relay/tuf/targets")
+        );
+        assert_eq!(
+            command.datastore_dir,
+            std::path::PathBuf::from("/var/lib/registry-relay/tuf")
+        );
+        assert_eq!(command.target_name, "registry-relay.yaml");
+    }
+
+    #[test]
+    fn config_verify_bundle_cli_requires_target_name() {
+        let err = parse_cli_command_from(command_args(&[
+            "registry-relay",
+            "config",
+            "verify-bundle",
+            "--config",
+            "/etc/registry-relay/current.yaml",
+            "--root-path",
+            "/etc/registry-relay/tuf/root.json",
+            "--metadata-dir",
+            "/etc/registry-relay/tuf/metadata",
+            "--targets-dir",
+            "/etc/registry-relay/tuf/targets",
+            "--datastore-dir",
+            "/var/lib/registry-relay/tuf",
+        ]))
+        .expect_err("target name is required");
+
+        assert_eq!(err.to_string(), "--target-name is required");
+    }
+
+    #[test]
+    fn config_cli_rejects_unknown_subcommand() {
+        let err =
+            parse_cli_command_from(command_args(&["registry-relay", "config", "apply-bundle"]))
+                .expect_err("unknown config subcommand fails");
+
+        assert_eq!(err.to_string(), "unknown config subcommand: apply-bundle");
     }
 
     #[tokio::test]
