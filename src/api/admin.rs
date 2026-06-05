@@ -1445,29 +1445,29 @@ fn clone_snapshot_with_config(
     config_provenance: ConfigProvenance,
     provenance_state: Option<Arc<ProvenanceState>>,
 ) -> crate::runtime_config::RelayRuntimeSnapshot {
-    crate::runtime_config::RelayRuntimeSnapshot {
-        config: Arc::new(config),
+    crate::runtime_config::RelayRuntimeSnapshot::new(
+        Arc::new(config),
         config_provenance,
-        compiled_metadata: current.compiled_metadata.clone(),
-        auth: current.auth.clone(),
-        audit_sink: Arc::clone(&current.audit_sink),
-        bind: current.bind,
-        admin_bind: current.admin_bind,
-        audit_kind: current.audit_kind,
-        df_ctx: Arc::clone(&current.df_ctx),
-        ingest: Arc::clone(&current.ingest),
-        entity_registry: Arc::clone(&current.entity_registry),
-        query: Arc::clone(&current.query),
-        aggregate_query: Arc::clone(&current.aggregate_query),
-        readiness_tx: current.readiness_tx.clone(),
-        readiness_rx: current.readiness_rx.clone(),
-        cursor_signer: Arc::clone(&current.cursor_signer),
-        provenance_state: provenance_state.or_else(|| current.provenance_state.clone()),
-        publicschema_registry: current.publicschema_registry.clone(),
+        current.compiled_metadata.clone(),
+        current.auth.clone(),
+        Arc::clone(&current.audit_sink),
+        current.bind,
+        current.admin_bind,
+        current.audit_kind,
+        Arc::clone(&current.df_ctx),
+        Arc::clone(&current.ingest),
+        Arc::clone(&current.entity_registry),
+        Arc::clone(&current.query),
+        Arc::clone(&current.aggregate_query),
+        current.readiness_tx.clone(),
+        current.readiness_rx.clone(),
+        Arc::clone(&current.cursor_signer),
+        provenance_state.or_else(|| current.provenance_state.clone()),
+        current.publicschema_registry.clone(),
         #[cfg(feature = "spdci-api-standards")]
-        spdci_response_mapper: current.spdci_response_mapper.clone(),
-        metrics: Arc::clone(&current.metrics),
-    }
+        current.spdci_response_mapper.clone(),
+        Arc::clone(&current.metrics),
+    )
 }
 
 fn antirollback_key(config: &Config, stream_id: &str) -> AntiRollbackKey {

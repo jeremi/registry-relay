@@ -510,29 +510,29 @@ fn build_fixture_from_config_path_with_provenance_state_and_admin_resolver(
         Arc::clone(&config),
     ));
     let metrics = RequestMetrics::shared();
-    let handle = Arc::new(RelayRuntimeHandle::new(RelayRuntimeSnapshot {
-        config: Arc::clone(&config),
-        config_provenance: config_provenance.clone(),
-        compiled_metadata: None,
-        auth: auth.clone(),
-        audit_sink: Arc::clone(&sink),
-        bind: config.server.bind,
-        admin_bind: config.server.admin_bind,
-        audit_kind: "memory",
-        df_ctx: Arc::clone(&df_ctx),
-        ingest: Arc::clone(&ingest),
-        entity_registry: Arc::clone(&entity_registry),
-        query: Arc::clone(&entity_query),
-        aggregate_query: Arc::clone(&aggregate_query),
-        readiness_tx: readiness_tx.clone(),
-        readiness_rx: readiness_rx.clone(),
-        cursor_signer: Arc::new(CursorSigner::new_random()),
+    let handle = Arc::new(RelayRuntimeHandle::new(RelayRuntimeSnapshot::new(
+        Arc::clone(&config),
+        config_provenance.clone(),
+        None,
+        auth.clone(),
+        Arc::clone(&sink),
+        config.server.bind,
+        config.server.admin_bind,
+        "memory",
+        Arc::clone(&df_ctx),
+        Arc::clone(&ingest),
+        Arc::clone(&entity_registry),
+        Arc::clone(&entity_query),
+        Arc::clone(&aggregate_query),
+        readiness_tx.clone(),
+        readiness_rx.clone(),
+        Arc::new(CursorSigner::new_random()),
         provenance_state,
-        publicschema_registry: None,
+        None,
         #[cfg(feature = "spdci-api-standards")]
-        spdci_response_mapper: None,
-        metrics: Arc::clone(&metrics),
-    }));
+        None,
+        Arc::clone(&metrics),
+    )));
     let public_app = build_app_with_entity_query_metadata_provenance_and_metrics(
         Arc::clone(&config),
         auth.clone(),
@@ -590,29 +590,7 @@ fn snapshot_with_provenance_state(
     current: &RelayRuntimeSnapshot,
     provenance_state: Option<Arc<ProvenanceState>>,
 ) -> RelayRuntimeSnapshot {
-    RelayRuntimeSnapshot {
-        config: Arc::clone(&current.config),
-        config_provenance: current.config_provenance.clone(),
-        compiled_metadata: current.compiled_metadata.clone(),
-        auth: current.auth.clone(),
-        audit_sink: Arc::clone(&current.audit_sink),
-        bind: current.bind,
-        admin_bind: current.admin_bind,
-        audit_kind: current.audit_kind,
-        df_ctx: Arc::clone(&current.df_ctx),
-        ingest: Arc::clone(&current.ingest),
-        entity_registry: Arc::clone(&current.entity_registry),
-        query: Arc::clone(&current.query),
-        aggregate_query: Arc::clone(&current.aggregate_query),
-        readiness_tx: current.readiness_tx.clone(),
-        readiness_rx: current.readiness_rx.clone(),
-        cursor_signer: Arc::clone(&current.cursor_signer),
-        provenance_state,
-        publicschema_registry: current.publicschema_registry.clone(),
-        #[cfg(feature = "spdci-api-standards")]
-        spdci_response_mapper: current.spdci_response_mapper.clone(),
-        metrics: Arc::clone(&current.metrics),
-    }
+    current.with_provenance_state(provenance_state)
 }
 
 fn local_provenance_from_path(path: &Path) -> ConfigProvenance {

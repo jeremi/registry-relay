@@ -531,7 +531,7 @@ async fn compile_relay_runtime(
     let spdci_response_mapper = build_spdci_response_mapper(&config)?.map(Arc::new);
     let metrics = RequestMetrics::shared();
 
-    Ok(RelayRuntimeSnapshot {
+    Ok(RelayRuntimeSnapshot::new(
         config,
         config_provenance,
         compiled_metadata,
@@ -553,7 +553,7 @@ async fn compile_relay_runtime(
         #[cfg(feature = "spdci-api-standards")]
         spdci_response_mapper,
         metrics,
-    })
+    ))
 }
 
 fn build_relay_app_from_runtime(

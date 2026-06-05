@@ -101,6 +101,7 @@ impl std::fmt::Debug for CursorSigner {
 }
 
 /// Fully compiled runtime objects derived from one validated config load.
+#[non_exhaustive]
 pub struct RelayRuntimeSnapshot {
     pub config: Arc<Config>,
     pub config_provenance: ConfigProvenance,
@@ -126,6 +127,84 @@ pub struct RelayRuntimeSnapshot {
 }
 
 impl RelayRuntimeSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        config: Arc<Config>,
+        config_provenance: ConfigProvenance,
+        compiled_metadata: Option<Arc<CompiledMetadata>>,
+        auth: AuthProviderRef,
+        audit_sink: Arc<AuditPipeline>,
+        bind: SocketAddr,
+        admin_bind: Option<SocketAddr>,
+        audit_kind: &'static str,
+        df_ctx: Arc<SessionContext>,
+        ingest: Arc<IngestRegistry>,
+        entity_registry: Arc<EntityRegistry>,
+        query: Arc<EntityQueryEngine>,
+        aggregate_query: Arc<AggregateQueryEngine>,
+        readiness_tx: watch::Sender<ReadinessSnapshot>,
+        readiness_rx: watch::Receiver<ReadinessSnapshot>,
+        cursor_signer: Arc<CursorSigner>,
+        provenance_state: Option<Arc<ProvenanceState>>,
+        publicschema_registry: Option<Arc<PublicSchemaVcRegistry>>,
+        #[cfg(feature = "spdci-api-standards")] spdci_response_mapper: Option<
+            Arc<SpdciResponseMapper>,
+        >,
+        metrics: Arc<RequestMetrics>,
+    ) -> Self {
+        Self {
+            config,
+            config_provenance,
+            compiled_metadata,
+            auth,
+            audit_sink,
+            bind,
+            admin_bind,
+            audit_kind,
+            df_ctx,
+            ingest,
+            entity_registry,
+            query,
+            aggregate_query,
+            readiness_tx,
+            readiness_rx,
+            cursor_signer,
+            provenance_state,
+            publicschema_registry,
+            #[cfg(feature = "spdci-api-standards")]
+            spdci_response_mapper,
+            metrics,
+        }
+    }
+
+    #[must_use]
+    pub fn with_provenance_state(&self, provenance_state: Option<Arc<ProvenanceState>>) -> Self {
+        Self::new(
+            Arc::clone(&self.config),
+            self.config_provenance.clone(),
+            self.compiled_metadata.clone(),
+            self.auth.clone(),
+            Arc::clone(&self.audit_sink),
+            self.bind,
+            self.admin_bind,
+            self.audit_kind,
+            Arc::clone(&self.df_ctx),
+            Arc::clone(&self.ingest),
+            Arc::clone(&self.entity_registry),
+            Arc::clone(&self.query),
+            Arc::clone(&self.aggregate_query),
+            self.readiness_tx.clone(),
+            self.readiness_rx.clone(),
+            Arc::clone(&self.cursor_signer),
+            provenance_state,
+            self.publicschema_registry.clone(),
+            #[cfg(feature = "spdci-api-standards")]
+            self.spdci_response_mapper.clone(),
+            Arc::clone(&self.metrics),
+        )
+    }
+
     #[must_use]
     pub fn dataset_count(&self) -> usize {
         self.config.datasets.len()
