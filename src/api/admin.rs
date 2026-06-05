@@ -15,13 +15,14 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use registry_manifest_core::CompiledMetadata;
+use registry_platform_config::RegistryTrustRoot;
 use registry_platform_config::{LocalTufRepositoryInput, TufConfigVerifier, VerificationContext};
 use registry_platform_crypto::{KeyProviderKind, KeyReadiness};
 use registry_platform_ops::{
     filter_posture_for_tier, internal_config_hash, posture_safe_runtime_config_hash,
     AntiRollbackKey, AntiRollbackProposal, AntiRollbackStoreError, ApplyReportResult,
     BreakGlassApproval, BreakGlassRateLimit, ConfigProvenance, ConfigSource, FileAntiRollbackStore,
-    PostureFilterError, PostureTier,
+    FileLocalApprovalStore, LocalOperatorApproval, PostureFilterError, PostureTier,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -83,6 +84,8 @@ struct ConfigApplyRequest {
     break_glass_approval: Option<BreakGlassApproval>,
     #[serde(default)]
     break_glass_rate_limit: Option<BreakGlassRateLimit>,
+    #[serde(default)]
+    local_approval_reference: Option<String>,
     #[serde(default)]
     config_yaml: Option<String>,
     #[serde(default)]
@@ -609,7 +612,11 @@ async fn config_apply(
             )
         }
     };
-    let LiveConfigChange::Compatible { provenance_state } = live_change else {
+    let LiveConfigChange::Compatible {
+        provenance_state,
+        local_approval_change_class,
+    } = live_change
+    else {
         provenance.last_apply_result =
             Some(ApplyReportResult::RejectedRestartRequired.as_posture_result());
         provenance.restart_required = true;
@@ -643,6 +650,39 @@ async fn config_apply(
             ),
         );
     };
+    let local_approval = match local_approval_proposal(
+        &request,
+        config_trust,
+        local_approval_change_class,
+        &provenance.internal_config_hash,
+        resolved.previous_config_hash.as_deref(),
+    ) {
+        Ok(local_approval) => local_approval,
+        Err(()) => {
+            return config_apply_report(
+                resolved.bundle_id.clone(),
+                resolved.sequence,
+                ApplyReportResult::RejectedLocalApproval,
+                false,
+                false,
+                StatusCode::CONFLICT,
+                resolved_config_audit(
+                    ConfigAdminAction::Apply,
+                    &resolved,
+                    "accepted",
+                    ApplyReportResult::RejectedLocalApproval.as_str(),
+                    false,
+                    false,
+                )
+                .with_break_glass_request(&request)
+                .with_local_approval_request(
+                    &request,
+                    None,
+                    local_approval_change_class,
+                ),
+            );
+        }
+    };
     let antirollback_store = FileAntiRollbackStore::new(&config_trust.antirollback_state_path);
     if let Err(error) = antirollback_store.accept(
         &antirollback_key(&current.config, &resolved.stream_id),
@@ -653,12 +693,14 @@ async fn config_apply(
             root_version: resolved.root_version,
             break_glass: break_glass.0,
             break_glass_rate_limit: break_glass.1,
-            local_approval: None,
-            local_approval_rate_limit: None,
+            local_approval: local_approval.clone(),
+            local_approval_rate_limit: local_approval.as_ref().map(|approval| approval.rate_limit),
         },
     ) {
         let result = if is_break_glass_error(&error) {
             ApplyReportResult::RejectedBreakGlass
+        } else if is_local_approval_error(&error) {
+            ApplyReportResult::RejectedLocalApproval
         } else {
             ApplyReportResult::RejectedRollback
         };
@@ -677,7 +719,12 @@ async fn config_apply(
                 false,
                 false,
             )
-            .with_break_glass_request(&request),
+            .with_break_glass_request(&request)
+            .with_local_approval_request(
+                &request,
+                local_approval.as_ref(),
+                local_approval_change_class,
+            ),
         );
     }
     provenance.last_apply_result = Some(ApplyReportResult::Applied.as_posture_result());
@@ -700,7 +747,12 @@ async fn config_apply(
             true,
             false,
         )
-        .with_break_glass_request(&request),
+        .with_break_glass_request(&request)
+        .with_local_approval_request(
+            &request,
+            local_approval.as_ref(),
+            local_approval_change_class,
+        ),
     )
 }
 
@@ -722,6 +774,28 @@ fn break_glass_proposal(
         (Some(approval), Some(rate_limit)) => Ok((Some(approval), Some(rate_limit))),
         _ => Err(()),
     }
+}
+
+fn local_approval_proposal(
+    request: &ConfigApplyRequest,
+    config_trust: &crate::config::ConfigTrustConfig,
+    change_class: Option<&'static str>,
+    config_hash: &str,
+    previous_config_hash: Option<&str>,
+) -> Result<Option<LocalOperatorApproval>, ()> {
+    let Some(change_class) = change_class else {
+        return Ok(None);
+    };
+    let Some(reference) = request.local_approval_reference.as_deref() else {
+        return Err(());
+    };
+    if reference.trim().is_empty() {
+        return Err(());
+    }
+    FileLocalApprovalStore::new(&config_trust.local_approval_state_path)
+        .load_for_apply(reference, change_class, config_hash, previous_config_hash)
+        .map(Some)
+        .map_err(|_| ())
 }
 
 fn require_break_glass_emergency_change_class(
@@ -750,6 +824,16 @@ fn is_break_glass_error(error: &AntiRollbackStoreError) -> bool {
             | AntiRollbackStoreError::BreakGlassRateLimited
             | AntiRollbackStoreError::InvalidBreakGlassApproval(_)
             | AntiRollbackStoreError::InvalidBreakGlassRateLimit(_)
+    )
+}
+
+fn is_local_approval_error(error: &AntiRollbackStoreError) -> bool {
+    matches!(
+        error,
+        AntiRollbackStoreError::LocalApprovalExpired
+            | AntiRollbackStoreError::LocalApprovalRateLimitMissing
+            | AntiRollbackStoreError::LocalApprovalRateLimited
+            | AntiRollbackStoreError::InvalidLocalApproval(_)
     )
 }
 
@@ -1122,6 +1206,7 @@ fn is_metadata_only_config_change(current: &Config, candidate: &Config) -> bool 
 enum LiveConfigChange {
     Compatible {
         provenance_state: Option<Arc<ProvenanceState>>,
+        local_approval_change_class: Option<&'static str>,
     },
     RestartRequired,
 }
@@ -1130,12 +1215,14 @@ enum LiveConfigChange {
 struct LiveChangeAuthorization {
     signing_key_rotation: bool,
     signing_key_cleanup: bool,
+    root_transition: bool,
 }
 
 fn live_change_authorization(candidate: &ResolvedConfigCandidate) -> LiveChangeAuthorization {
     LiveChangeAuthorization {
         signing_key_rotation: candidate.change_classes.contains("signing_key_rotation"),
         signing_key_cleanup: candidate.change_classes.contains("signing_key_cleanup"),
+        root_transition: candidate.change_classes.contains("root_transition"),
     }
 }
 
@@ -1147,6 +1234,14 @@ fn classify_live_config_change(
     if is_metadata_only_config_change(&current.config, candidate) {
         return Ok(LiveConfigChange::Compatible {
             provenance_state: None,
+            local_approval_change_class: None,
+        });
+    }
+    if authorization.root_transition && is_root_transition_config_change(&current.config, candidate)
+    {
+        return Ok(LiveConfigChange::Compatible {
+            provenance_state: None,
+            local_approval_change_class: Some("root_transition"),
         });
     }
     if !is_provenance_signing_rotation_change(&current.config, candidate) {
@@ -1197,6 +1292,7 @@ fn classify_live_config_change(
             resolved,
             current_state.clock,
         ))),
+        local_approval_change_class: None,
     })
 }
 
@@ -1273,6 +1369,64 @@ fn is_provenance_signing_rotation_change(current: &Config, candidate: &Config) -
             current.provenance.as_ref(),
             candidate.provenance.as_ref(),
         )
+}
+
+fn is_root_transition_config_change(current: &Config, candidate: &Config) -> bool {
+    let (Some(current_trust), Some(candidate_trust)) =
+        (&current.config_trust, &candidate.config_trust)
+    else {
+        return false;
+    };
+    current_trust.antirollback_state_path == candidate_trust.antirollback_state_path
+        && current_trust.local_approval_state_path == candidate_trust.local_approval_state_path
+        && !candidate_trust.accepted_roots.is_empty()
+        && current_trust.accepted_roots != candidate_trust.accepted_roots
+        && retained_accepted_roots_unchanged(
+            &current_trust.accepted_roots,
+            &candidate_trust.accepted_roots,
+        )
+        && equivalent_except_config_trust_accepted_roots(current, candidate)
+}
+
+fn retained_accepted_roots_unchanged(
+    current: &[RegistryTrustRoot],
+    candidate: &[RegistryTrustRoot],
+) -> bool {
+    if !root_ids_are_unique(current) || !root_ids_are_unique(candidate) {
+        return false;
+    }
+    current.iter().all(|current_root| {
+        candidate
+            .iter()
+            .find(|candidate_root| candidate_root.root_id == current_root.root_id)
+            .is_none_or(|candidate_root| candidate_root == current_root)
+    })
+}
+
+fn root_ids_are_unique(roots: &[RegistryTrustRoot]) -> bool {
+    let mut seen = BTreeSet::new();
+    roots.iter().all(|root| seen.insert(root.root_id.as_str()))
+}
+
+fn equivalent_except_config_trust_accepted_roots(current: &Config, candidate: &Config) -> bool {
+    let (Some(current_trust), Some(candidate_trust)) =
+        (&current.config_trust, &candidate.config_trust)
+    else {
+        return false;
+    };
+    current.instance.id == candidate.instance.id
+        && current.instance.environment == candidate.instance.environment
+        && format!("{:?}", current.server) == format!("{:?}", candidate.server)
+        && current_trust.antirollback_state_path == candidate_trust.antirollback_state_path
+        && current_trust.local_approval_state_path == candidate_trust.local_approval_state_path
+        && format!("{:?}", current.metadata) == format!("{:?}", candidate.metadata)
+        && format!("{:?}", current.catalog) == format!("{:?}", candidate.catalog)
+        && current.vocabularies == candidate.vocabularies
+        && format!("{:?}", current.auth) == format!("{:?}", candidate.auth)
+        && format!("{:?}", current.audit) == format!("{:?}", candidate.audit)
+        && format!("{:?}", current.datasets) == format!("{:?}", candidate.datasets)
+        && format!("{:?}", current.provenance) == format!("{:?}", candidate.provenance)
+        && format!("{:?}", current.standards) == format!("{:?}", candidate.standards)
 }
 
 fn equivalent_except_public_metadata(current: &Config, candidate: &Config) -> bool {
@@ -1460,6 +1614,12 @@ fn unresolved_config_audit(
         break_glass_emergency_change_class: None,
         break_glass_expires_at_unix_seconds: None,
         break_glass_rate_limit_identity: None,
+        local_approval_reference: None,
+        local_approval_approved_by: None,
+        local_approval_reason_hash: None,
+        local_approval_change_class: None,
+        local_approval_expires_at_unix_seconds: None,
+        local_approval_rate_limit_identity: None,
     }
 }
 
@@ -1492,6 +1652,12 @@ fn resolved_config_audit(
         break_glass_emergency_change_class: None,
         break_glass_expires_at_unix_seconds: None,
         break_glass_rate_limit_identity: None,
+        local_approval_reference: None,
+        local_approval_approved_by: None,
+        local_approval_reason_hash: None,
+        local_approval_change_class: None,
+        local_approval_expires_at_unix_seconds: None,
+        local_approval_rate_limit_identity: None,
     }
 }
 
@@ -1509,6 +1675,39 @@ impl ConfigAuditBreakGlassExt for ConfigAuditExt {
             self.break_glass_emergency_change_class = Some(approval.emergency_change_class.clone());
             self.break_glass_expires_at_unix_seconds = Some(approval.expires_at_unix_seconds);
             self.break_glass_rate_limit_identity = Some(approval.rate_limit_identity.clone());
+        }
+        self
+    }
+}
+
+trait ConfigAuditLocalApprovalExt {
+    fn with_local_approval_request(
+        self,
+        request: &ConfigApplyRequest,
+        approval: Option<&LocalOperatorApproval>,
+        change_class: Option<&'static str>,
+    ) -> Self;
+}
+
+impl ConfigAuditLocalApprovalExt for ConfigAuditExt {
+    fn with_local_approval_request(
+        mut self,
+        request: &ConfigApplyRequest,
+        approval: Option<&LocalOperatorApproval>,
+        change_class: Option<&'static str>,
+    ) -> Self {
+        self.local_approval_reference = request.local_approval_reference.clone();
+        if self.local_approval_change_class.is_none() {
+            self.local_approval_change_class = change_class.map(str::to_string);
+        }
+        if let Some(approval) = approval {
+            self.local_approval_reference = Some(approval.approval_reference.clone());
+            self.local_approval_approved_by = Some(approval.approved_by.clone());
+            self.local_approval_reason_hash =
+                Some(internal_config_hash(approval.reason.as_bytes()));
+            self.local_approval_change_class = Some(approval.change_class.clone());
+            self.local_approval_expires_at_unix_seconds = Some(approval.expires_at_unix_seconds);
+            self.local_approval_rate_limit_identity = Some(approval.rate_limit_identity.clone());
         }
         self
     }
@@ -1534,6 +1733,9 @@ fn apply_result_to_posture_audit(apply_result: &str) -> &'static str {
                 .as_str()
         }
         "rejected_break_glass" => ApplyReportResult::RejectedBreakGlass
+            .as_posture_result()
+            .as_str(),
+        "rejected_local_approval" => ApplyReportResult::RejectedLocalApproval
             .as_posture_result()
             .as_str(),
         "rejected_rollback"

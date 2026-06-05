@@ -15,7 +15,7 @@ use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 use registry_platform_ops::{
     internal_config_hash, posture_safe_runtime_config_hash, AntiRollbackKey, AntiRollbackRecord,
-    ConfigProvenance, FileAntiRollbackStore,
+    ConfigProvenance, FileAntiRollbackStore, FileLocalApprovalStore,
 };
 use registry_relay::audit::{AuditPipeline, InMemorySink};
 use registry_relay::auth::api_key::{ApiKeyAuth, ApiKeyEntry};
@@ -54,6 +54,7 @@ struct AdminFixture {
     audit_sink: InMemorySink,
     config_path: std::path::PathBuf,
     antirollback_path: std::path::PathBuf,
+    local_approval_path: std::path::PathBuf,
     current_config_hash: String,
     source_path: std::path::PathBuf,
 }
@@ -171,6 +172,7 @@ fn write_config_with_instance_and_trust(
 ) -> std::path::PathBuf {
     let cache_dir = tmp.path().join("cache");
     let antirollback_path = tmp.path().join("config-antirollback.json");
+    let local_approval_path = tmp.path().join("config-local-approvals.json");
     let source_path = tmp.path().join("social_registry.csv");
     std::fs::copy(fixture("social_registry.csv"), &source_path).expect("copy source fixture");
     let instance_block = instance_block.unwrap_or("");
@@ -183,6 +185,7 @@ fn write_config_with_instance_and_trust(
             r#"
 config_trust:
   antirollback_state_path: "{}"
+  local_approval_state_path: "{}"
   accepted_roots:
     - root_id: ops-root
       production: false
@@ -206,8 +209,10 @@ config_trust:
             - signing_key_cleanup
             - signing_key_rotation
             - emergency_break_glass
+            - root_transition
 "#,
             antirollback_path.to_string_lossy(),
+            local_approval_path.to_string_lossy(),
             tuf_root_sha256,
             TUF_TARGETS_SIGNER_KID,
             TUF_TARGETS_SIGNER_KID,
@@ -492,6 +497,11 @@ fn build_fixture_from_config_path_with_provenance_state(
             .as_ref()
             .map(|trust| trust.antirollback_state_path.clone())
             .unwrap_or_else(|| config_path.with_file_name("config-antirollback.json")),
+        local_approval_path: config
+            .config_trust
+            .as_ref()
+            .map(|trust| trust.local_approval_state_path.clone())
+            .unwrap_or_else(|| config_path.with_file_name("config-local-approvals.json")),
         current_config_hash: config_provenance.internal_config_hash.clone(),
         source_path: config_path
             .parent()
@@ -592,6 +602,25 @@ fn build_fixture() -> AdminFixture {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = write_config(&tmp);
     build_fixture_from_config_path(tmp, config_path)
+}
+
+#[test]
+fn simple_local_config_without_config_trust_still_loads() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config_with_instance_and_trust(
+        &tmp,
+        Some(
+            r#"instance:
+  id: relay-test-instance
+  environment: lab
+"#,
+        ),
+        false,
+    );
+
+    let config = config::load(&config_path).expect("simple local config loads");
+
+    assert!(config.config_trust.is_none());
 }
 
 async fn assert_problem(resp: axum_test::TestResponse, status: StatusCode, code: &str) -> Value {
@@ -753,6 +782,65 @@ fn break_glass_rate_limit() -> Value {
         "max_accepted": 1,
         "window_seconds": 3600
     })
+}
+
+fn local_approval(reference: &str, config_hash: &str, previous_config_hash: &str) -> Value {
+    let expires_at_unix_seconds = Utc::now().timestamp() as u64 + 3600;
+    json!({
+        "approved_by": "ops@example.test",
+        "reason": "approve local root transition",
+        "approval_reference": reference,
+        "change_class": "root_transition",
+        "config_hash": config_hash,
+        "previous_config_hash": previous_config_hash,
+        "expires_at_unix_seconds": expires_at_unix_seconds,
+        "rate_limit_identity": "registry-relay/relay-test-instance/lab/test-stream/root-transition",
+        "rate_limit": {
+            "max_accepted": 1,
+            "window_seconds": 3600
+        }
+    })
+}
+
+fn write_local_approval(fixture: &AdminFixture, approval: Value) {
+    std::fs::write(
+        &fixture.local_approval_path,
+        serde_json::to_vec_pretty(&json!({ "approvals": [approval] }))
+            .expect("local approval file serializes"),
+    )
+    .expect("local approval file writes");
+}
+
+fn candidate_with_additional_accepted_root(fixture: &AdminFixture) -> String {
+    let config_yaml = std::fs::read_to_string(&fixture.config_path).expect("config reads");
+    let tuf_root_sha256 = sha256_uri(
+        &std::fs::read(tough_fixture("simple-rsa").join("root.json"))
+            .expect("trusted TUF root fixture reads"),
+    );
+    let additional_root = format!(
+        r#"    - root_id: ops-root-next
+      production: false
+      tuf_root_sha256: "{}"
+      high_risk_change_classes: []
+      signers:
+        {}:
+          kid: {}
+          enabled: true
+      roles:
+        - name: config-admin
+          threshold: 1
+          signer_kids:
+            - {}
+          allowed_change_classes:
+            - root_transition
+
+"#,
+        tuf_root_sha256, TUF_TARGETS_SIGNER_KID, TUF_TARGETS_SIGNER_KID, TUF_TARGETS_SIGNER_KID
+    );
+    config_yaml.replace(
+        "\nmetadata:\n  manifest_path:",
+        &format!("\n{additional_root}metadata:\n  manifest_path:"),
+    )
 }
 
 async fn write_signed_config_tuf_fixture(
@@ -1484,6 +1572,218 @@ async fn config_apply_signed_tuf_break_glass_with_approval_swaps_runtime_snapsho
     assert!(!serde_json::to_string(config_audit)
         .expect("config audit serializes")
         .contains("recover from bad live config"));
+}
+
+#[tokio::test]
+async fn config_apply_signed_root_transition_with_local_approval_swaps_runtime_snapshot() {
+    let fixture = build_fixture();
+    let candidate = candidate_with_additional_accepted_root(&fixture);
+    let candidate_hash = internal_config_hash(candidate.as_bytes());
+    write_local_approval(
+        &fixture,
+        local_approval(
+            "ROOT-2026-Q2",
+            &candidate_hash,
+            &fixture.current_config_hash,
+        ),
+    );
+    let signed = write_signed_config_tuf_fixture_with_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &[TUF_TARGETS_SIGNER_KID],
+        &["root_transition"],
+    )
+    .await;
+    let mut request = signed_tuf_apply_request(&signed);
+    request["local_approval_reference"] = json!("ROOT-2026-Q2");
+
+    let response = post_admin_config(&fixture, "/admin/v1/config/apply", request, ADMIN_KEY).await;
+
+    if response.status_code() != StatusCode::OK {
+        let body: Value = response.json();
+        panic!("approved root transition apply should succeed, got {body:#}");
+    }
+    let body: Value = response.json();
+    assert_eq!(body["result"], "applied");
+    assert_eq!(body["posture_result"], "accepted");
+    assert_eq!(body["applied"], true);
+    assert_eq!(body["restart_required"], false);
+
+    let posture = fixture
+        .server
+        .get("/admin/v1/posture")
+        .add_header("Authorization", format!("Bearer {OPS_KEY}"))
+        .await;
+    posture.assert_status(StatusCode::OK);
+    let posture: Value = posture.json();
+    assert_eq!(posture["configuration"]["last_apply_result"], "accepted");
+    assert_eq!(
+        fixture
+            .handle
+            .load_full()
+            .config
+            .config_trust
+            .as_ref()
+            .expect("config trust remains configured")
+            .accepted_roots
+            .len(),
+        2
+    );
+
+    let record = FileAntiRollbackStore::new(&fixture.antirollback_path)
+        .load(&AntiRollbackKey {
+            product: "registry-relay".to_string(),
+            instance_id: "relay-test-instance".to_string(),
+            environment: "lab".to_string(),
+            stream_id: "test-stream".to_string(),
+        })
+        .expect("antirollback state loads");
+    assert_eq!(record.last_sequence, 5);
+    assert_eq!(record.last_config_hash, candidate_hash);
+    assert_eq!(record.local_approvals.accepted.len(), 1);
+    assert_eq!(
+        record.local_approvals.accepted[0].approval_reference,
+        "ROOT-2026-Q2"
+    );
+    assert_eq!(
+        record.local_approvals.accepted[0].change_class,
+        "root_transition"
+    );
+
+    let loaded_approval = FileLocalApprovalStore::new(&fixture.local_approval_path)
+        .load_for_apply(
+            "ROOT-2026-Q2",
+            "root_transition",
+            &candidate_hash,
+            Some(&fixture.current_config_hash),
+        )
+        .expect("local approval remains loadable for audit evidence");
+    assert_eq!(loaded_approval.approved_by, "ops@example.test");
+
+    let audit_record = config_audit_record(&fixture, "/admin/v1/config/apply");
+    let config_audit = &audit_record["config"];
+    assert_eq!(config_audit["local_approval_reference"], "ROOT-2026-Q2");
+    assert_eq!(
+        config_audit["local_approval_approved_by"],
+        "ops@example.test"
+    );
+    assert_eq!(
+        config_audit["local_approval_change_class"],
+        "root_transition"
+    );
+    assert_eq!(
+        config_audit["local_approval_rate_limit_identity"],
+        "registry-relay/relay-test-instance/lab/test-stream/root-transition"
+    );
+    assert!(config_audit["local_approval_reason_hash"]
+        .as_str()
+        .is_some_and(|hash| hash.starts_with("sha256:")));
+    assert!(!serde_json::to_string(config_audit)
+        .expect("config audit serializes")
+        .contains("approve local root transition"));
+}
+
+#[tokio::test]
+async fn config_apply_signed_root_transition_missing_local_approval_rejects_without_antirollback() {
+    let fixture = build_fixture();
+    let candidate = candidate_with_additional_accepted_root(&fixture);
+    let signed = write_signed_config_tuf_fixture_with_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &[TUF_TARGETS_SIGNER_KID],
+        &["root_transition"],
+    )
+    .await;
+
+    let response = post_admin_config(
+        &fixture,
+        "/admin/v1/config/apply",
+        signed_tuf_apply_request(&signed),
+        ADMIN_KEY,
+    )
+    .await;
+
+    response.assert_status(StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(body["result"], "rejected_local_approval");
+    assert_eq!(body["posture_result"], "rejected");
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["restart_required"], false);
+
+    let record = FileAntiRollbackStore::new(&fixture.antirollback_path)
+        .load(&AntiRollbackKey {
+            product: "registry-relay".to_string(),
+            instance_id: "relay-test-instance".to_string(),
+            environment: "lab".to_string(),
+            stream_id: "test-stream".to_string(),
+        })
+        .expect("antirollback state loads");
+    assert_eq!(record.last_sequence, 0);
+    assert_eq!(record.last_config_hash, fixture.current_config_hash);
+    assert!(record.local_approvals.accepted.is_empty());
+
+    assert_eq!(
+        fixture
+            .handle
+            .load_full()
+            .config
+            .config_trust
+            .as_ref()
+            .expect("config trust remains configured")
+            .accepted_roots
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn config_apply_signed_root_transition_wrong_class_is_restart_required() {
+    let fixture = build_fixture();
+    let candidate = candidate_with_additional_accepted_root(&fixture);
+    let candidate_hash = internal_config_hash(candidate.as_bytes());
+    write_local_approval(
+        &fixture,
+        local_approval(
+            "ROOT-2026-Q2",
+            &candidate_hash,
+            &fixture.current_config_hash,
+        ),
+    );
+    let signed = write_signed_config_tuf_fixture_with_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &[TUF_TARGETS_SIGNER_KID],
+        &["public_metadata"],
+    )
+    .await;
+    let mut request = signed_tuf_apply_request(&signed);
+    request["local_approval_reference"] = json!("ROOT-2026-Q2");
+
+    let response = post_admin_config(&fixture, "/admin/v1/config/apply", request, ADMIN_KEY).await;
+
+    response.assert_status(StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(body["result"], "rejected_restart_required");
+    assert_eq!(body["posture_result"], "rejected");
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["restart_required"], true);
+
+    let record = FileAntiRollbackStore::new(&fixture.antirollback_path)
+        .load(&AntiRollbackKey {
+            product: "registry-relay".to_string(),
+            instance_id: "relay-test-instance".to_string(),
+            environment: "lab".to_string(),
+            stream_id: "test-stream".to_string(),
+        })
+        .expect("antirollback state loads");
+    assert_eq!(record.last_sequence, 0);
+    assert!(record.local_approvals.accepted.is_empty());
 }
 
 #[tokio::test]

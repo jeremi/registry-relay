@@ -137,12 +137,12 @@ Important configuration blocks:
 - `server.cors.allowed_origins`: default deny when empty.
 - `server.trust_proxy`: only enable when the gateway is behind trusted proxies and those proxy CIDRs are configured.
 - `auth.api_keys`: key ids, hash env var names, and scopes.
-- `config_trust`: optional local trust roots and anti-rollback state for governed signed config apply.
+- `config_trust`: optional local trust roots, anti-rollback state, and local approval state for governed signed config apply.
 - `datasets[].source.path`: local file path inside the container or host.
 - `datasets[].refresh`: `mtime`, `interval`, or `manual`.
 - `audit`: audit sink and JSONL options.
 
-Local-file startup config changes remain a rolling restart operation. Governed signed config apply is available on the private admin listener when the runtime handle and `config_trust` are installed. It can live-apply compatible public metadata changes and compatible provenance signing-key rotations; route-affecting, listener, auth, audit, dataset, standards, and most provenance shape changes still report `restart_required` and must be rolled through deployment. Dataset reload does not reload startup `config.yaml`.
+Local-file startup config changes remain a rolling restart operation. Governed signed config apply is available on the private admin listener when the runtime handle and `config_trust` are installed. It can live-apply compatible public metadata changes, compatible provenance signing-key rotations, and locally approved root transitions that only change `config_trust.accepted_roots`; route-affecting, listener, auth, audit, dataset, standards, and most provenance shape changes still report `restart_required` and must be rolled through deployment. Dataset reload does not reload startup `config.yaml`.
 
 ## API-Key Provisioning And Rotation
 

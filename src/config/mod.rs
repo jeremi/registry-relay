@@ -104,6 +104,7 @@ fn default_instance_id() -> String {
 #[serde(deny_unknown_fields)]
 pub struct ConfigTrustConfig {
     pub antirollback_state_path: PathBuf,
+    pub local_approval_state_path: PathBuf,
     #[serde(default)]
     pub accepted_roots: Vec<RegistryTrustRoot>,
 }

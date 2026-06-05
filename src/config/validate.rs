@@ -66,6 +66,17 @@ fn validate_config_trust(config: &Config) -> Result<(), ConfigError> {
         );
         return Err(ConfigError::ValidationError);
     }
+    if config_trust
+        .local_approval_state_path
+        .as_os_str()
+        .is_empty()
+    {
+        tracing::error!(
+            code = "config.validation_error",
+            "config_trust.local_approval_state_path must not be empty"
+        );
+        return Err(ConfigError::ValidationError);
+    }
     for root in &config_trust.accepted_roots {
         if let Err(error) = root.validate() {
             tracing::error!(

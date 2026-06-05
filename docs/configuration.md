@@ -74,6 +74,7 @@ The default CORS policy is deny by omission. Add explicit trusted origins only.
 ```yaml
 config_trust:
   antirollback_state_path: /var/lib/registry-relay/config-antirollback.json
+  local_approval_state_path: /var/lib/registry-relay/config-local-approvals.json
   accepted_roots:
     - root_id: ops-root
       production: true
@@ -103,9 +104,10 @@ config_trust:
 
 `config_trust` is optional. Simple local deployments omit it and keep using the
 local YAML loaded at startup. Governed config apply requires
-`antirollback_state_path`, which must point to durable local state such as a
-mounted volume. Registry Relay fails closed for apply when the file is absent,
-unreadable, stale, or inconsistent; verify and dry-run remain available.
+`antirollback_state_path` and `local_approval_state_path`, which must point to
+durable local state such as a mounted volume. Registry Relay fails closed for
+apply when required local state is absent, unreadable, stale, or inconsistent;
+verify and dry-run remain available.
 
 Signed apply also requires at least one local `accepted_roots` entry that
 authorizes every change class in the signed target metadata. Registry Relay uses
