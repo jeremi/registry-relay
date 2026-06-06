@@ -1032,6 +1032,10 @@ fn governed_config_docs_do_not_ship_unresolved_config_trust_placeholders() {
         !doc.contains("TUF_TARGETS_ROLE_KEY_ID"),
         "governed config example must use concrete illustrative key IDs"
     );
+    assert!(
+        doc.contains("\"1111111111111111111111111111111111111111111111111111111111111111\""),
+        "illustrative all-digit TUF key IDs must be quoted for YAML parsers"
+    );
 }
 
 #[tokio::test]
