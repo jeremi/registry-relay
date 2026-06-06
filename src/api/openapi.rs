@@ -4051,7 +4051,7 @@ mod tests {
             );
         }
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/example.yaml");
-        let raw = fs::read_to_string(path).expect("example config reads");
+        let mut raw = fs::read_to_string(path).expect("example config reads");
         let mut config: Config = serde_saphyr::from_str(&raw).expect("example config parses");
         for (index, key) in config.auth.api_keys.iter_mut().enumerate() {
             let fingerprint = test_fingerprint(index);
@@ -4063,7 +4063,8 @@ mod tests {
             unsafe {
                 env::set_var(env_name, &fingerprint);
             }
-            key.fingerprint.commitment = credential_fingerprint_commitment(
+            let original_commitment = key.fingerprint.commitment.clone();
+            let expected_commitment = credential_fingerprint_commitment(
                 CredentialCommitmentContext {
                     product: CredentialProduct::RegistryRelay,
                     credential_type: CredentialType::ApiKey,
@@ -4071,9 +4072,12 @@ mod tests {
                 },
                 &fingerprint,
             );
+            key.fingerprint.commitment = expected_commitment.clone();
+            raw = raw.replace(&original_commitment, &expected_commitment);
         }
-        crate::config::validate::run(&config).expect("example config validates");
-        config
+        let adjusted = tempfile::NamedTempFile::new().expect("adjusted example config file");
+        fs::write(adjusted.path(), raw).expect("adjusted example config writes");
+        crate::config::load(adjusted.path()).expect("adjusted example config loads")
     }
 
     fn enable_provenance(config: &mut Config) {
