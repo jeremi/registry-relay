@@ -4024,8 +4024,6 @@ fn openapi_unavailable(detail: &'static str) -> Response {
 mod tests {
     #[cfg(feature = "spdci-api-standards")]
     use std::collections::BTreeMap;
-    use std::env;
-    use std::fs;
     use std::time::Duration;
 
     use super::*;
@@ -4034,50 +4032,11 @@ mod tests {
         ProvenanceAlgorithm, ProvenanceConfig, SignerConfig, SoftwareSignerConfig,
     };
     use crate::metadata::catalog::{CatalogLinks, DatasetLinks, EntityLinks};
-    use registry_platform_authcommon::{
-        credential_fingerprint_commitment, CredentialCommitmentContext, CredentialProduct,
-        CredentialType,
-    };
-
-    fn test_fingerprint(index: usize) -> String {
-        format!("sha256:{:064x}", index + 1)
-    }
 
     fn load_example_config() -> Config {
-        unsafe {
-            env::set_var(
-                "REGISTRY_RELAY_AUDIT_HASH_SECRET",
-                "relay-openapi-audit-secret-32-bytes",
-            );
-        }
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/example.yaml");
-        let mut raw = fs::read_to_string(path).expect("example config reads");
-        let mut config: Config = serde_saphyr::from_str(&raw).expect("example config parses");
-        for (index, key) in config.auth.api_keys.iter_mut().enumerate() {
-            let fingerprint = test_fingerprint(index);
-            let env_name = key
-                .fingerprint
-                .name
-                .as_deref()
-                .expect("example API key fingerprint uses env provider");
-            unsafe {
-                env::set_var(env_name, &fingerprint);
-            }
-            let original_commitment = key.fingerprint.commitment.clone();
-            let expected_commitment = credential_fingerprint_commitment(
-                CredentialCommitmentContext {
-                    product: CredentialProduct::RegistryRelay,
-                    credential_type: CredentialType::ApiKey,
-                    credential_id: &key.id,
-                },
-                &fingerprint,
-            );
-            key.fingerprint.commitment = expected_commitment.clone();
-            raw = raw.replace(&original_commitment, &expected_commitment);
-        }
-        let adjusted = tempfile::NamedTempFile::new().expect("adjusted example config file");
-        fs::write(adjusted.path(), raw).expect("adjusted example config writes");
-        crate::config::load(adjusted.path()).expect("adjusted example config loads")
+        crate::config::test_support::load_example_config_for_tests(
+            "relay-openapi-audit-secret-32-bytes",
+        )
     }
 
     fn enable_provenance(config: &mut Config) {
