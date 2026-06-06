@@ -45,6 +45,40 @@ fn openssl_available() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("destination directory");
+    for entry in std::fs::read_dir(src).expect("source directory readable") {
+        let entry = entry.expect("source directory entry");
+        let source = entry.path();
+        let target = dst.join(entry.file_name());
+        let file_type = entry.file_type().expect("entry file type");
+        if file_type.is_dir() {
+            copy_dir_recursive(&source, &target);
+        } else if file_type.is_file() {
+            std::fs::copy(&source, &target).unwrap_or_else(|err| {
+                panic!(
+                    "copy {} to {} failed: {err}",
+                    source.display(),
+                    target.display()
+                )
+            });
+        }
+    }
+}
+
+fn isolated_demo_keygen_root(repo: &Path) -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    let scripts = tmp.path().join("demo/scripts");
+    std::fs::create_dir_all(&scripts).expect("isolated demo scripts dir");
+    std::fs::copy(
+        repo.join("demo/scripts/generate_demo_keys.py"),
+        scripts.join("generate_demo_keys.py"),
+    )
+    .expect("copy demo key generator");
+    copy_dir_recursive(&repo.join("demo/config"), &tmp.path().join("demo/config"));
+    tmp
+}
+
 #[test]
 fn generated_demo_holder_proofs_verify_with_embedded_public_jwk() {
     if !openssl_available() {
@@ -177,13 +211,12 @@ fn demo_key_generator_writes_secret_files_0600() {
     }
 
     let root = repo_root();
-    let tmp = TempDir::new().expect("tempdir");
-    let env_file = tmp.path().join("demo.env");
-    let bruno_env = root.join("bruno/registry-relay-demo/.env");
-    let _ = std::fs::remove_file(&bruno_env);
+    let isolated = isolated_demo_keygen_root(&root);
+    let env_file = isolated.path().join("demo.env");
+    let bruno_env = isolated.path().join("bruno/registry-relay-demo/.env");
 
     let output = Command::new(python())
-        .current_dir(&root)
+        .current_dir(isolated.path())
         .arg("demo/scripts/generate_demo_keys.py")
         .arg("--env-file")
         .arg(&env_file)
@@ -201,8 +234,6 @@ fn demo_key_generator_writes_secret_files_0600() {
     let contents = std::fs::read_to_string(&env_file).expect("env file readable");
     assert!(contents.contains("REGISTRY_NOTARY_ISSUER_JWK="));
     assert!(!contents.contains("2oPoxdKuO7Kpd-3JLfNW_4xwpFxItbS-fxe03ZybYEw"));
-
-    std::fs::remove_file(bruno_env).expect("remove generated bruno env");
 }
 
 #[test]
