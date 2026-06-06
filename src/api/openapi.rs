@@ -4025,7 +4025,7 @@ mod tests {
     #[cfg(feature = "spdci-api-standards")]
     use std::collections::BTreeMap;
     use std::env;
-    use std::path::PathBuf;
+    use std::fs;
     use std::time::Duration;
 
     use super::*;
@@ -4034,21 +4034,46 @@ mod tests {
         ProvenanceAlgorithm, ProvenanceConfig, SignerConfig, SoftwareSignerConfig,
     };
     use crate::metadata::catalog::{CatalogLinks, DatasetLinks, EntityLinks};
+    use registry_platform_authcommon::{
+        credential_fingerprint_commitment, CredentialCommitmentContext, CredentialProduct,
+        CredentialType,
+    };
+
+    fn test_fingerprint(index: usize) -> String {
+        format!("sha256:{:064x}", index + 1)
+    }
 
     fn load_example_config() -> Config {
-        let fingerprint = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         unsafe {
-            env::set_var("STATS_OFFICE_API_KEY_HASH", fingerprint);
-            env::set_var("PROGRAM_SYSTEM_API_KEY_HASH", fingerprint);
-            env::set_var("VERIFICATION_SERVICE_API_KEY_HASH", fingerprint);
-            env::set_var("OPERATIONS_OPERATOR_API_KEY_HASH", fingerprint);
             env::set_var(
                 "REGISTRY_RELAY_AUDIT_HASH_SECRET",
                 "relay-openapi-audit-secret-32-bytes",
             );
         }
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/example.yaml");
-        crate::config::load(&path).expect("example config loads")
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/example.yaml");
+        let raw = fs::read_to_string(path).expect("example config reads");
+        let mut config: Config = serde_saphyr::from_str(&raw).expect("example config parses");
+        for (index, key) in config.auth.api_keys.iter_mut().enumerate() {
+            let fingerprint = test_fingerprint(index);
+            let env_name = key
+                .fingerprint
+                .name
+                .as_deref()
+                .expect("example API key fingerprint uses env provider");
+            unsafe {
+                env::set_var(env_name, &fingerprint);
+            }
+            key.fingerprint.commitment = credential_fingerprint_commitment(
+                CredentialCommitmentContext {
+                    product: CredentialProduct::RegistryRelay,
+                    credential_type: CredentialType::ApiKey,
+                    credential_id: &key.id,
+                },
+                &fingerprint,
+            );
+        }
+        crate::config::validate::run(&config).expect("example config validates");
+        config
     }
 
     fn enable_provenance(config: &mut Config) {
