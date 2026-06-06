@@ -50,8 +50,8 @@ impl FileWatchSigner {
         verification_method_id: String,
     ) -> Result<Self, SignerError> {
         let algorithm = cfg.signing_algorithm.into();
-        let raw = read_key_file(&cfg.path)?;
         let key_mtime = key_file_mtime(&cfg.path)?;
+        let raw = read_key_file(&cfg.path)?;
         let signer = SoftwareSigner::from_jwk_str(&raw, algorithm, verification_method_id.clone())?;
         let expected_public_jwk = signer.public_jwk();
         Ok(Self {
@@ -100,7 +100,6 @@ impl FileWatchSigner {
         }
 
         let Ok(raw) = read_key_file(&self.path) else {
-            state.key_mtime = key_mtime;
             state.readiness = KeyReadiness::Degraded;
             tracing::warn!(
                 event = "provenance.file_watch_key_unreadable",

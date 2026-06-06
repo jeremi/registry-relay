@@ -165,7 +165,7 @@ sources are recorded as `signed_bundle_file`; inline diagnostics are recorded as
 `allow_dev_insecure_fetch_urls: true` and are intended only for tests and local
 development.
 
-Break-glass is apply-only. `verify` and `dry-run` reject any break-glass fields. `apply` accepts break-glass only for signed TUF targets and only when all three controls are present, the signed bundle includes the requested emergency change class, and local anti-rollback rate limits allow it:
+Break-glass is apply-only. `verify` and `dry-run` reject any break-glass fields. `apply` accepts break-glass only for signed TUF targets and only when the approval is present, the signed bundle includes the requested emergency change class, and local anti-rollback rate limits allow it. The rolling-window rate-limit policy comes from local `config_trust.break_glass_rate_limit`; clients must not include it in the request:
 
 ```json
 {
@@ -177,10 +177,6 @@ Break-glass is apply-only. `verify` and `dry-run` reject any break-glass fields.
     "emergency_change_class": "emergency_break_glass",
     "expires_at_unix_seconds": 1780000000,
     "rate_limit_identity": "registry-relay/relay-prod/production/default"
-  },
-  "break_glass_rate_limit": {
-    "max_accepted": 1,
-    "window_seconds": 3600
   }
 }
 ```

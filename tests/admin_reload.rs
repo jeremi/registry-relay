@@ -17,7 +17,9 @@ use registry_platform_ops::{
     internal_config_hash, posture_safe_runtime_config_hash, AntiRollbackKey, AntiRollbackRecord,
     ConfigProvenance, FileAntiRollbackStore, FileLocalApprovalStore,
 };
-use registry_relay::api::admin::{CandidateProvenanceResolver, CandidateProvenanceResolverRef};
+use registry_relay::api::admin::{
+    router as admin_router, CandidateProvenanceResolver, CandidateProvenanceResolverRef,
+};
 use registry_relay::audit::{AuditPipeline, InMemorySink};
 use registry_relay::auth::api_key::{ApiKeyAuth, ApiKeyEntry};
 use registry_relay::auth::ScopeSet;
@@ -50,7 +52,7 @@ const ADMIN_KEY: &str = "admin-test-token-0123456789";
 const NON_ADMIN_KEY: &str = "non-admin-test-token-0123456789";
 const OPS_KEY: &str = "ops-test-token-0123456789";
 const AUDIT_SECRET_VALUE: &str = "relay-admin-reload-audit-secret-32-bytes";
-const PRIVATE_JWK_VALUE: &str = r#"{"kty":"OKP","crv":"Ed25519","kid":"relay-private-key","d":"private-jwk-material","x":"public-jwk-material"}"#;
+const NON_KEY_PLACEHOLDER_VALUE: &str = "relay-admin-reload-private-jwk-placeholder";
 const TUF_TARGETS_SIGNER_KID: &str =
     "8ec3a843a0f9328c863cac4046ab1cacbbc67888476ac7acf73d9bcd9a223ada";
 
@@ -241,6 +243,9 @@ fn write_config_with_instance_and_trust(
 config_trust:
   antirollback_state_path: "{}"
   local_approval_state_path: "{}"
+  break_glass_rate_limit:
+    max_accepted: 1
+    window_seconds: 3600
   accepted_roots:
     - root_id: ops-root
       production: false
@@ -472,7 +477,7 @@ fn build_fixture_from_config_path_with_provenance_state_and_admin_resolver(
     #[allow(unused_unsafe)]
     unsafe {
         std::env::set_var("REGISTRY_RELAY_TEST_AUDIT_HASH_SECRET", AUDIT_SECRET_VALUE);
-        std::env::set_var("REGISTRY_RELAY_TEST_PRIVATE_JWK", PRIVATE_JWK_VALUE);
+        std::env::set_var("REGISTRY_RELAY_TEST_PRIVATE_JWK", NON_KEY_PLACEHOLDER_VALUE);
     }
     let config: Arc<Config> = Arc::new(config::load(&config_path).expect("config loads"));
     let provenance_state = if include_provenance_state {
@@ -714,6 +719,17 @@ async fn table_reload_without_credential_is_rejected() {
 
     let resp = fixture
         .server
+        .post("/admin/v1/datasets/social_registry/tables/beneficiaries_csv/reload")
+        .await;
+
+    assert_problem(resp, StatusCode::UNAUTHORIZED, "auth.missing_credential").await;
+}
+
+#[tokio::test]
+async fn table_reload_without_credential_is_rejected_before_runtime_inspection() {
+    let server = TestServer::new(admin_router());
+
+    let resp = server
         .post("/admin/v1/datasets/social_registry/tables/beneficiaries_csv/reload")
         .await;
 
@@ -1572,7 +1588,6 @@ async fn config_apply_break_glass_requires_signed_emergency_change_class() {
     let mut request = signed_tuf_apply_request(&signed);
     request["break_glass"] = json!(true);
     request["break_glass_approval"] = break_glass_approval();
-    request["break_glass_rate_limit"] = break_glass_rate_limit();
 
     let response = post_admin_config(&fixture, "/admin/v1/config/apply", request, ADMIN_KEY).await;
 
@@ -1615,7 +1630,6 @@ async fn config_apply_signed_tuf_break_glass_with_approval_swaps_runtime_snapsho
     let mut request = signed_tuf_apply_request(&signed);
     request["break_glass"] = json!(true);
     request["break_glass_approval"] = break_glass_approval();
-    request["break_glass_rate_limit"] = break_glass_rate_limit();
 
     let response = post_admin_config(&fixture, "/admin/v1/config/apply", request, ADMIN_KEY).await;
 
@@ -1678,6 +1692,48 @@ async fn config_apply_signed_tuf_break_glass_with_approval_swaps_runtime_snapsho
     assert!(!serde_json::to_string(config_audit)
         .expect("config audit serializes")
         .contains("recover from bad live config"));
+}
+
+#[tokio::test]
+async fn config_apply_break_glass_rejects_client_supplied_rate_limit() {
+    let fixture = build_fixture();
+    let candidate = std::fs::read_to_string(&fixture.config_path)
+        .expect("config reads")
+        .replace("owner: Test Ministry", "owner: Emergency Ministry");
+    let wrong_previous_hash =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let signed = write_signed_config_tuf_fixture_with_previous_hash_and_change_classes(
+        &fixture,
+        &candidate,
+        5,
+        "relay-test-instance",
+        &["kid-a", "kid-b"],
+        &["public_metadata", "emergency_break_glass"],
+        wrong_previous_hash,
+    )
+    .await;
+    let mut request = signed_tuf_apply_request(&signed);
+    request["break_glass"] = json!(true);
+    request["break_glass_approval"] = break_glass_approval();
+    request["break_glass_rate_limit"] = break_glass_rate_limit();
+
+    let response = post_admin_config(&fixture, "/admin/v1/config/apply", request, ADMIN_KEY).await;
+
+    response.assert_status(StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(body["result"], "rejected_break_glass");
+    assert_eq!(body["applied"], false);
+
+    let record = FileAntiRollbackStore::new(&fixture.antirollback_path)
+        .load(&AntiRollbackKey {
+            product: "registry-relay".to_string(),
+            instance_id: "relay-test-instance".to_string(),
+            environment: "lab".to_string(),
+            stream_id: "test-stream".to_string(),
+        })
+        .expect("antirollback state loads");
+    assert_eq!(record.last_sequence, 0);
+    assert!(record.break_glass.accepted.is_empty());
 }
 
 #[tokio::test]
@@ -3428,8 +3484,7 @@ async fn posture_response_has_schema_metadata_and_redacted_public_summaries() {
         &raw,
         &[
             AUDIT_SECRET_VALUE,
-            PRIVATE_JWK_VALUE,
-            "private-jwk-material",
+            NON_KEY_PLACEHOLDER_VALUE,
             "REGISTRY_RELAY_TEST_AUDIT_HASH_SECRET",
             "REGISTRY_RELAY_TEST_PRIVATE_JWK",
             "hash_secret_env",

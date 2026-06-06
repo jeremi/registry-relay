@@ -351,15 +351,11 @@ Break-glass requests are apply-only and must include all current fields:
     "emergency_change_class": "emergency_break_glass",
     "expires_at_unix_seconds": 1780000000,
     "rate_limit_identity": "registry-relay/relay-prod/production/default"
-  },
-  "break_glass_rate_limit": {
-    "max_accepted": 1,
-    "window_seconds": 3600
   }
 }
 ```
 
-Break-glass can waive only the previous-config-hash rollback check. It does not waive monotonic sequence, TUF signature and local trust-root authorization, expiry, emergency change-class authorization, or local rolling-window rate limits. The audit record stores the approval reference, approver, emergency change class, expiry, and rate-limit identity; it stores a hash of `reason`, not the raw free text.
+Break-glass can waive only the previous-config-hash rollback check. It does not waive monotonic sequence, TUF signature and local trust-root authorization, expiry, emergency change-class authorization, or local rolling-window rate limits. The rolling-window policy comes from local `config_trust.break_glass_rate_limit`; requests that include `break_glass_rate_limit` are rejected. The audit record stores the approval reference, approver, emergency change class, expiry, and rate-limit identity; it stores a hash of `reason`, not the raw free text.
 
 ## Readiness And Probes
 

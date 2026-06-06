@@ -204,3 +204,35 @@ fn file_watch_signer_keeps_last_good_key_when_replacement_is_corrupt() {
     assert_eq!(signer.readiness(), KeyReadiness::Degraded);
     sign_and_verify(&signer, vk);
 }
+
+#[test]
+fn file_watch_signer_retries_after_transient_read_failure_at_same_mtime() {
+    let tmp = TempDir::new().expect("tempdir");
+    let key_path = tmp.path().join("active.jwk");
+    let sk = SigningKey::generate(&mut OsRng);
+    let vk = sk.verifying_key();
+    let jwk = jwk_from_keypair(&sk, "did:web:example#fw-a");
+    fs::write(&key_path, &jwk).expect("write key");
+    let signer = FileWatchSigner::from_config(
+        &FileWatchSignerConfig {
+            path: key_path.clone(),
+            signing_algorithm: ProvenanceAlgorithm::EdDSA,
+        },
+        "did:web:example#fw-a".to_string(),
+    )
+    .expect("file-watch signer builds");
+
+    fs::remove_file(&key_path).expect("remove key file");
+    fs::create_dir(&key_path).expect("replace key file with unreadable directory");
+    let unreadable_mtime = file_mtime(&key_path);
+
+    assert_eq!(signer.readiness(), KeyReadiness::Degraded);
+    sign_and_verify(&signer, vk);
+
+    fs::remove_dir(&key_path).expect("remove unreadable directory");
+    fs::write(&key_path, jwk).expect("restore key file");
+    set_file_mtime(&key_path, unreadable_mtime);
+
+    assert_eq!(signer.readiness(), KeyReadiness::Ready);
+    sign_and_verify(&signer, vk);
+}

@@ -75,6 +75,9 @@ The default CORS policy is deny by omission. Add explicit trusted origins only.
 config_trust:
   antirollback_state_path: /var/lib/registry-relay/config-antirollback.json
   local_approval_state_path: /var/lib/registry-relay/config-local-approvals.json
+  break_glass_rate_limit:
+    max_accepted: 1
+    window_seconds: 3600
   accepted_roots:
     - root_id: ops-root
       production: true
@@ -105,7 +108,10 @@ config_trust:
 `config_trust` is optional. Simple local deployments omit it and keep using the
 local YAML loaded at startup. Governed config apply requires
 `antirollback_state_path` and `local_approval_state_path`, which must point to
-durable local state such as a mounted volume. Registry Relay fails closed for
+durable local state such as a mounted volume. `break_glass_rate_limit` is the
+trusted local rolling-window policy used for break-glass apply requests; when
+omitted it defaults to one accepted request per rate-limit identity per hour.
+Registry Relay fails closed for
 apply when required local state is absent, unreadable, stale, or inconsistent;
 verify and dry-run remain available.
 

@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use registry_platform_config::RegistryTrustRoot;
+use registry_platform_ops::BreakGlassRateLimit;
 use serde::{Deserialize, Serialize};
 
 pub mod capabilities;
@@ -106,8 +107,17 @@ fn default_instance_id() -> String {
 pub struct ConfigTrustConfig {
     pub antirollback_state_path: PathBuf,
     pub local_approval_state_path: PathBuf,
+    #[serde(default = "default_break_glass_rate_limit")]
+    pub break_glass_rate_limit: BreakGlassRateLimit,
     #[serde(default)]
     pub accepted_roots: Vec<RegistryTrustRoot>,
+}
+
+fn default_break_glass_rate_limit() -> BreakGlassRateLimit {
+    BreakGlassRateLimit {
+        max_accepted: 1,
+        window_seconds: 3600,
+    }
 }
 
 /// Optional split metadata manifest loaded alongside the runtime config.

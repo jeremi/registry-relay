@@ -719,7 +719,8 @@ async fn config_apply(
             );
         }
     };
-    let antirollback_store = FileAntiRollbackStore::new(&config_trust.antirollback_state_path);
+    let antirollback_store = FileAntiRollbackStore::new(&config_trust.antirollback_state_path)
+        .with_break_glass_rate_limit(config_trust.break_glass_rate_limit);
     if let Err(error) = antirollback_store.accept(
         &antirollback_key(&current.config, &resolved.stream_id),
         AntiRollbackProposal {
@@ -727,8 +728,8 @@ async fn config_apply(
             previous_config_hash: resolved.previous_config_hash.clone(),
             config_hash: provenance.internal_config_hash.clone(),
             root_version: resolved.root_version,
-            break_glass: break_glass.0,
-            break_glass_rate_limit: break_glass.1,
+            break_glass,
+            break_glass_rate_limit: None,
             local_approval: local_approval.clone(),
             local_approval_rate_limit: local_approval.as_ref().map(|approval| approval.rate_limit),
         },
@@ -792,22 +793,20 @@ async fn config_apply(
     )
 }
 
-fn break_glass_proposal(
-    request: &ConfigApplyRequest,
-) -> Result<(Option<BreakGlassApproval>, Option<BreakGlassRateLimit>), ()> {
+fn break_glass_proposal(request: &ConfigApplyRequest) -> Result<Option<BreakGlassApproval>, ()> {
     if !request.break_glass {
         return if request.break_glass_approval.is_some() || request.break_glass_rate_limit.is_some()
         {
             Err(())
         } else {
-            Ok((None, None))
+            Ok(None)
         };
     }
-    match (
-        request.break_glass_approval.clone(),
-        request.break_glass_rate_limit,
-    ) {
-        (Some(approval), Some(rate_limit)) => Ok((Some(approval), Some(rate_limit))),
+    if request.break_glass_rate_limit.is_some() {
+        return Err(());
+    }
+    match request.break_glass_approval.clone() {
+        Some(approval) => Ok(Some(approval)),
         _ => Err(()),
     }
 }
@@ -888,14 +887,14 @@ async fn reload_table(
     runtime: RuntimeSnapshot,
     principal: Option<Extension<Principal>>,
 ) -> Response {
+    if let Err(error) = require_admin_scope(principal) {
+        return error.into_response();
+    }
     let Some(registry) = runtime.ingest() else {
         return reload_unavailable(
             "admin table reload route matched, but ingest registry is not installed",
         );
     };
-    if let Err(error) = require_admin_scope(principal) {
-        return error.into_response();
-    }
 
     let result = registry.reload(&path.dataset_id, &path.table_id).await;
     publish_readiness(runtime.readiness_tx(), &registry);
@@ -1315,6 +1314,7 @@ fn is_root_transition_config_change(current: &Config, candidate: &Config) -> boo
     };
     current_trust.antirollback_state_path == candidate_trust.antirollback_state_path
         && current_trust.local_approval_state_path == candidate_trust.local_approval_state_path
+        && current_trust.break_glass_rate_limit == candidate_trust.break_glass_rate_limit
         && !candidate_trust.accepted_roots.is_empty()
         && current_trust.accepted_roots != candidate_trust.accepted_roots
         && retained_accepted_roots_unchanged(
@@ -1355,6 +1355,7 @@ fn equivalent_except_config_trust_accepted_roots(current: &Config, candidate: &C
         && format!("{:?}", current.server) == format!("{:?}", candidate.server)
         && current_trust.antirollback_state_path == candidate_trust.antirollback_state_path
         && current_trust.local_approval_state_path == candidate_trust.local_approval_state_path
+        && current_trust.break_glass_rate_limit == candidate_trust.break_glass_rate_limit
         && format!("{:?}", current.metadata) == format!("{:?}", candidate.metadata)
         && format!("{:?}", current.catalog) == format!("{:?}", candidate.catalog)
         && current.vocabularies == candidate.vocabularies
