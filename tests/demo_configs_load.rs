@@ -3,7 +3,7 @@
 //! combined `all_demos.yaml`, and the full standards demo config. This keeps
 //! the public demo pack covered by a focused config-loading check.
 //!
-//! The core configs declare the same six persona `hash_env:` names
+//! The core configs declare the same six persona fingerprint secret names
 //! (`CATALOG_VIEWER_HASH` etc.), so this binary keeps a single test function
 //! that loads them in sequence. Cargo runs each `tests/*.rs` binary in its
 //! own process, so the global env writes here cannot race with other tests

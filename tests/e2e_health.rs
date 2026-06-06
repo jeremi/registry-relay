@@ -47,7 +47,7 @@ use tokio::sync::watch;
 use ulid::Ulid;
 
 /// Load the canonical example config from the repo. The config
-/// loader runs cross-field validation; we set the required `hash_env`
+/// loader runs cross-field validation; we set the required fingerprint secret
 /// env vars to a known API key fingerprint so the loader does not
 /// fail with `config.missing_secret`.
 fn load_example_config() -> Config {

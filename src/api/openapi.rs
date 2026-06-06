@@ -1100,7 +1100,7 @@ fn security_schemes(config: &Config) -> Value {
     let mut schemes = Map::new();
     let bearer_description = match config.auth.mode {
         AuthMode::ApiKey => {
-            "API key carried as `Authorization: Bearer <key>`. The gateway hashes the bearer with SHA-256 and matches the fingerprint against `config.auth.api_keys[*].hash_env`."
+            "API key carried as `Authorization: Bearer <key>`. The gateway hashes the bearer with SHA-256 and matches the fingerprint resolved from `config.auth.api_keys[*].fingerprint`."
         }
         AuthMode::Oidc => {
             "OIDC/OAuth2 bearer JWT validated against the configured issuer, audience, JWKS, token type, and scope claim."
