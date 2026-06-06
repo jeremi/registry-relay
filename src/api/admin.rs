@@ -623,16 +623,21 @@ async fn config_apply(
             .with_break_glass_request(&request),
         );
     }
-    if let Err(ConfigCandidateError::BundleInvalid(detail)) =
+    if let Err(ConfigCandidateError::BundleInvalid(_detail)) =
         authorize_signed_config_candidate(&resolved, &current.config)
     {
-        return with_config_audit(
-            config_bundle_invalid(detail),
+        return config_apply_report(
+            resolved.bundle_id.clone(),
+            resolved.sequence,
+            ApplyReportResult::RejectedThreshold,
+            false,
+            false,
+            StatusCode::CONFLICT,
             resolved_config_audit(
                 ConfigAdminAction::Apply,
                 &resolved,
                 "rejected",
-                "rejected_product_validation",
+                ApplyReportResult::RejectedThreshold.as_str(),
                 false,
                 false,
             ),
