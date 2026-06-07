@@ -71,7 +71,10 @@ fn visible_metadata_entity_ids(
     principal: Option<Extension<Principal>>,
 ) -> Result<BTreeSet<(String, String)>, Error> {
     let Some(Extension(principal)) = principal else {
-        return Err(AuthError::MissingCredential.into());
+        if config.server.openapi_requires_auth {
+            return Err(AuthError::MissingCredential.into());
+        }
+        return Ok(all_metadata_entity_ids(config));
     };
     let entity_ids = config
         .datasets
@@ -92,6 +95,19 @@ fn visible_metadata_entity_ids(
     } else {
         Ok(entity_ids)
     }
+}
+
+fn all_metadata_entity_ids(config: &Config) -> BTreeSet<(String, String)> {
+    config
+        .datasets
+        .iter()
+        .flat_map(|dataset| {
+            dataset
+                .entities
+                .iter()
+                .map(|entity| (dataset.id.to_string(), entity.name.clone()))
+        })
+        .collect()
 }
 
 fn openapi_document(catalog: &CatalogDocument, config: &Config) -> Value {

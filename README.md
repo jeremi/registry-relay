@@ -270,7 +270,7 @@ Registry Notary endpoint directly for claim and evidence verification.
 
 Storage table ids do not appear in these paths. Filters are allowed only when declared under the entity's `api.allowed_filters`. Arbitrary SQL is not exposed.
 
-`GET /docs` serves a local Scalar API reference shell. The shell is public, but it contains no catalog data by itself. It asks for a bearer token and then fetches the auth-gated `GET /openapi.json` document with that token.
+`GET /docs` serves a local Scalar API reference shell. The shell is public, but it contains no catalog data by itself. By default it asks for a bearer token and fetches the auth-gated `GET /openapi.json` document with that token. Local demos and controlled tooling can set `server.openapi_requires_auth: false` to let the shell load the OpenAPI document without a token.
 
 See [docs/api.md](docs/api.md) for scope requirements, query parameters, pagination, `Data-Purpose`, conditional requests, and Problem Details error shapes.
 
