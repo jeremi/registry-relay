@@ -70,11 +70,11 @@ fn visible_metadata_entity_ids(
     config: &Config,
     principal: Option<Extension<Principal>>,
 ) -> Result<BTreeSet<(String, String)>, Error> {
-    let Some(Extension(principal)) = principal else {
-        if config.server.openapi_requires_auth {
-            return Err(AuthError::MissingCredential.into());
-        }
+    if !config.server.openapi_requires_auth {
         return Ok(all_metadata_entity_ids(config));
+    }
+    let Some(Extension(principal)) = principal else {
+        return Err(AuthError::MissingCredential.into());
     };
     let entity_ids = config
         .datasets
@@ -4043,6 +4043,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::auth::{AuthMode as PrincipalAuthMode, ScopeSet};
     use crate::config::{
         AdmsStatus, AuthMode, ClaimValidity, GatewayIssuerConfig, IssuerConfig,
         ProvenanceAlgorithm, ProvenanceConfig, SignerConfig, SoftwareSignerConfig,
@@ -4140,6 +4141,23 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn public_openapi_ignores_present_principal_scope_filtering() {
+        let mut config = load_example_config();
+        config.server.openapi_requires_auth = false;
+        let principal = Principal {
+            principal_id: "limited-caller".to_string(),
+            scopes: ScopeSet::from_iter(["registry_relay:ops_read"]),
+            auth_mode: PrincipalAuthMode::ApiKey,
+        };
+
+        let visible = visible_metadata_entity_ids(&config, Some(Extension(principal)))
+            .expect("public OpenAPI should not apply caller scope filtering");
+
+        assert_eq!(visible, all_metadata_entity_ids(&config));
+        assert!(!visible.is_empty());
     }
 
     #[test]
