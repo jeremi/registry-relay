@@ -161,6 +161,11 @@ Relay validates the access-token JOSE `typ` header against `auth.oidc.token_type
 
 ## Run Locally
 
+For the first local tutorial, use
+[Publish a spreadsheet as a secured registry API](https://docs.registrystack.org/tutorials/publish-spreadsheet-secured-registry-api/).
+It uses `registryctl` to create a Relay project from a sample workbook, start the protected API, and
+run the smoke checks without cloning this repository.
+
 The example config references data under `./data/social_registry.xlsx`, so either adapt the path or copy a fixture into place:
 
 ```sh
