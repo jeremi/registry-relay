@@ -588,7 +588,9 @@ async fn config_apply_bundle_cli_drives_live_admin_remote_root_transition_with_l
     let tmp = TempDir::new().expect("tempdir");
     let public_bind = allocate_loopback_addr();
     let admin_bind = allocate_loopback_addr();
-    let current_yaml = current_config_yaml(&tmp, public_bind, admin_bind);
+    let remote = MockServer::start().await;
+    let current_yaml =
+        current_config_yaml_with_remote_tuf_repository(&tmp, public_bind, admin_bind, &remote);
     let current_config_path = tmp.path().join("current.yaml");
     std::fs::write(&current_config_path, &current_yaml).expect("current config writes");
     registry_relay::config::load(&current_config_path).expect("current config validates");
