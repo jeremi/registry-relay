@@ -997,13 +997,36 @@ fn resolve_remote_addr(
         return peer;
     }
 
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .and_then(|v| v.parse::<IpAddr>().ok())
+    x_forwarded_for_chain(headers)
+        .map(|mut chain| {
+            chain.push(peer);
+            chain
+                .iter()
+                .rev()
+                .find(|hop| !trusted_proxy_contains(**hop, &settings.trusted_proxies))
+                .copied()
+                .unwrap_or_else(|| chain[0])
+        })
         .unwrap_or(peer)
+}
+
+fn x_forwarded_for_chain(headers: &HeaderMap) -> Option<Vec<IpAddr>> {
+    let mut chain = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        let value = value.to_str().ok()?;
+        for hop in value.split(',') {
+            let hop = hop.trim();
+            if hop.is_empty() {
+                return None;
+            }
+            chain.push(hop.parse::<IpAddr>().ok()?);
+        }
+    }
+    if chain.is_empty() {
+        None
+    } else {
+        Some(chain)
+    }
 }
 
 fn trusted_proxy_contains(peer: IpAddr, trusted_proxies: &[String]) -> bool {
