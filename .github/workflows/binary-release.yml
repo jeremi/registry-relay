@@ -127,7 +127,7 @@ jobs:
           cp README.md LICENSE "$package_dir/"
           if [ "$ARCHIVE_EXT" = "zip" ]; then
             PACKAGE_DIR="$package_dir" PACKAGE_ZIP="target/dist/${package}.zip" \
-              pwsh -NoProfile -Command 'Compress-Archive -Path (Join-Path $env:PACKAGE_DIR "*") -DestinationPath $env:PACKAGE_ZIP -Force'
+              pwsh -NoProfile -Command "Compress-Archive -Path (Join-Path \$env:PACKAGE_DIR '*') -DestinationPath \$env:PACKAGE_ZIP -Force"
           else
             tar -C target/dist -cJf "target/dist/${package}.tar.xz" "$package"
           fi
