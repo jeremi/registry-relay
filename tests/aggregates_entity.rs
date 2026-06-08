@@ -265,6 +265,37 @@ async fn server_with_aggregates() -> TestServer {
     )
 }
 
+async fn server_with_formula_cells() -> TestServer {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = tmp.path().join("aggregates_entity.yaml");
+    std::fs::write(&config_path, AGGREGATE_CONFIG).expect("write config");
+    let cfg = Arc::new(config::load(&config_path).expect("config loads"));
+    let registry = Arc::new(EntityRegistry::from_config(&cfg).expect("registry"));
+    let ctx = Arc::new(SessionContext::new());
+
+    register_households(&ctx);
+    register_individuals_with_municipalities(
+        &ctx,
+        &["=cmd", "+cmd", "-cmd", "@cmd", "\tcmd", "\rcmd"],
+    );
+
+    let query = Arc::new(AggregateQueryEngine::new(
+        Arc::clone(&ctx),
+        Arc::clone(&registry),
+        Arc::clone(&cfg),
+    ));
+
+    TestServer::new(
+        aggregates_router::<()>()
+            .layer(Extension(query))
+            .layer(Extension(registry))
+            .layer(Extension(principal(&[
+                "social_registry:metadata",
+                "social_registry:aggregate",
+            ]))),
+    )
+}
+
 async fn protected_router_with_aggregates() -> TestServer {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = tmp.path().join("aggregates_entity.yaml");
@@ -320,6 +351,11 @@ fn register_households(ctx: &SessionContext) {
 }
 
 fn register_individuals(ctx: &SessionContext) {
+    register_individuals_with_municipalities(ctx, &["mun-1", "mun-1", "mun-2"]);
+}
+
+fn register_individuals_with_municipalities(ctx: &SessionContext, municipality_codes: &[&str]) {
+    let len = municipality_codes.len();
     let schema = Arc::new(Schema::new(vec![
         Field::new("individual_id", DataType::Utf8, false),
         Field::new("household_id", DataType::Utf8, false),
@@ -327,18 +363,34 @@ fn register_individuals(ctx: &SessionContext) {
         Field::new("payment_amount", DataType::Float64, true),
         Field::new("enrolled_on", DataType::Utf8, true),
     ]));
+    let individual_ids = (0..len)
+        .map(|idx| format!("ind-{}", idx + 1))
+        .collect::<Vec<_>>();
+    let household_ids = (0..len)
+        .map(|idx| if idx < 2 { "hh-1" } else { "hh-2" })
+        .collect::<Vec<_>>();
+    let payment_amounts = (0..len)
+        .map(|idx| Some(((idx + 1) * 10) as f64))
+        .collect::<Vec<_>>();
+    let enrolled_on = (0..len)
+        .map(|idx| {
+            if idx == 0 {
+                "2024-01-10"
+            } else if idx == 1 {
+                "2024-02-10"
+            } else {
+                "2025-01-10"
+            }
+        })
+        .collect::<Vec<_>>();
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
-            Arc::new(StringArray::from(vec!["ind-1", "ind-2", "ind-3"])),
-            Arc::new(StringArray::from(vec!["hh-1", "hh-1", "hh-2"])),
-            Arc::new(StringArray::from(vec!["mun-1", "mun-1", "mun-2"])),
-            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
-            Arc::new(StringArray::from(vec![
-                "2024-01-10",
-                "2024-02-10",
-                "2025-01-10",
-            ])),
+            Arc::new(StringArray::from(individual_ids)),
+            Arc::new(StringArray::from(household_ids)),
+            Arc::new(StringArray::from(municipality_codes.to_vec())),
+            Arc::new(Float64Array::from(payment_amounts)),
+            Arc::new(StringArray::from(enrolled_on)),
         ],
     )
     .expect("individual batch");
@@ -489,6 +541,41 @@ async fn csv_response_carries_metadata_headers_and_status_columns() {
     );
     assert!(body.contains("mun-1,2,"));
     assert!(body.contains("mun-2,,S"));
+}
+
+#[tokio::test]
+async fn aggregate_csv_escapes_formula_leading_string_cells() {
+    let resp = server_with_formula_cells()
+        .await
+        .get("/v1/datasets/social_registry/aggregates/by_municipality?f=csv")
+        .await;
+
+    resp.assert_status_ok();
+    let body = resp.text();
+    let mut reader = csv::Reader::from_reader(body.as_bytes());
+    let mut municipality_codes = reader
+        .records()
+        .map(|record| {
+            record
+                .expect("csv record")
+                .get(0)
+                .expect("municipality column")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    municipality_codes.sort();
+
+    assert_eq!(
+        municipality_codes,
+        vec![
+            "'\tcmd".to_string(),
+            "'\rcmd".to_string(),
+            "'+cmd".to_string(),
+            "'-cmd".to_string(),
+            "'=cmd".to_string(),
+            "'@cmd".to_string(),
+        ]
+    );
 }
 
 #[tokio::test]

@@ -874,10 +874,17 @@ fn csv_row_value(object: &serde_json::Map<String, Value>, header: &str) -> Strin
 fn csv_value(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
-        Value::String(value) => value.clone(),
+        Value::String(value) => escape_csv_formula_cell(value),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn escape_csv_formula_cell(value: &str) -> String {
+    match value.as_bytes().first() {
+        Some(b'=' | b'+' | b'-' | b'@' | b'\t' | b'\r') => format!("'{value}"),
+        _ => value.to_string(),
     }
 }
 
