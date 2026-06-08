@@ -1967,6 +1967,7 @@ fn validate_source_config(
             connect_timeout,
             query_timeout,
             live_max_connections,
+            live_max_rows,
         } => {
             if !is_valid_env_var_name(connection_env) {
                 tracing::error!(
@@ -2035,13 +2036,17 @@ fn validate_source_config(
                 validate_configured_postgres_query(dataset, resource, connection_env, sql)?;
             }
 
-            if connect_timeout.is_zero() || query_timeout.is_zero() || *live_max_connections == 0 {
+            if connect_timeout.is_zero()
+                || query_timeout.is_zero()
+                || *live_max_connections == 0
+                || *live_max_rows == 0
+            {
                 tracing::error!(
                     code = "config.validation_error",
                     dataset_id = %dataset.id,
                     resource_id = resource.map(|r| r.id.as_str()).unwrap_or("<dataset>"),
                     connection_env = %connection_env,
-                    "postgres timeouts must be non-zero and live_max_connections must be greater than zero"
+                    "postgres timeouts must be non-zero and live limits must be greater than zero"
                 );
                 return Err(ConfigError::ValidationError);
             }
