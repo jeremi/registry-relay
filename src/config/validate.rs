@@ -107,6 +107,27 @@ fn validate_config_trust(config: &Config) -> Result<(), ConfigError> {
             return Err(ConfigError::ValidationError);
         }
     }
+    for repo in &config_trust.remote_tuf_repositories {
+        if repo.root_path.as_os_str().is_empty() || repo.datastore_dir.as_os_str().is_empty() {
+            tracing::error!(
+                code = "config.validation_error",
+                "config_trust.remote_tuf_repositories paths must not be empty"
+            );
+            return Err(ConfigError::ValidationError);
+        }
+        if !is_allowed_remote_tuf_url(&repo.metadata_base_url, repo.allow_dev_insecure_fetch_urls)
+            || !is_allowed_remote_tuf_url(
+                &repo.targets_base_url,
+                repo.allow_dev_insecure_fetch_urls,
+            )
+        {
+            tracing::error!(
+                code = "config.validation_error",
+                "config_trust.remote_tuf_repositories URLs must be https:// unless allow_dev_insecure_fetch_urls is true for loopback dev"
+            );
+            return Err(ConfigError::ValidationError);
+        }
+    }
     Ok(())
 }
 
@@ -1509,17 +1530,31 @@ fn validate_oidc(oidc: &OidcConfig) -> Result<(), ConfigError> {
 }
 
 fn is_allowed_oidc_url(url: &str, allow_dev_insecure_fetch_urls: bool) -> bool {
-    if let Some(rest) = url.strip_prefix("https://") {
-        return !rest.is_empty();
-    }
-    if !allow_dev_insecure_fetch_urls {
+    is_https_or_dev_loopback_url(url, allow_dev_insecure_fetch_urls)
+}
+
+fn is_allowed_remote_tuf_url(url: &str, allow_dev_insecure_fetch_urls: bool) -> bool {
+    is_https_or_dev_loopback_url(url, allow_dev_insecure_fetch_urls)
+}
+
+fn is_https_or_dev_loopback_url(url: &str, allow_dev_insecure_fetch_urls: bool) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.host_str().is_none() {
         return false;
     }
-    if let Some(rest) = url.strip_prefix("http://") {
-        let host = rest.split(['/', ':']).next().unwrap_or("");
-        return host == "localhost" || host == "127.0.0.1" || host == "[::1]";
+    match parsed.scheme() {
+        "https" => true,
+        "http" if allow_dev_insecure_fetch_urls => parsed
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("localhost") || is_loopback_ip(host)),
+        _ => false,
     }
-    false
+}
+
+fn is_loopback_ip(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 fn validate_scopes(config: &Config) -> Result<(), ConfigError> {

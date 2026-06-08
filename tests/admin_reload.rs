@@ -907,6 +907,35 @@ fn build_fixture() -> AdminFixture {
     build_fixture_from_config_path(tmp, config_path)
 }
 
+fn build_fixture_with_remote_tuf_repository(server: &MockServer) -> AdminFixture {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(&tmp);
+    insert_remote_tuf_repository(&config_path, &tmp, server);
+    build_fixture_from_config_path(tmp, config_path)
+}
+
+fn insert_remote_tuf_repository(config_path: &Path, tmp: &TempDir, server: &MockServer) {
+    let yaml = std::fs::read_to_string(config_path).expect("config reads");
+    let remote = format!(
+        r#"  remote_tuf_repositories:
+    - root_path: "{}"
+      metadata_base_url: "{}/metadata"
+      targets_base_url: "{}/targets"
+      datastore_dir: "{}"
+      allow_dev_insecure_fetch_urls: true
+"#,
+        tmp.path().join("tuf/metadata/1.root.json").display(),
+        server.uri(),
+        server.uri(),
+        tmp.path().join("tuf/datastore").display()
+    );
+    std::fs::write(
+        config_path,
+        yaml.replace("  accepted_roots:\n", &(remote + "  accepted_roots:\n")),
+    )
+    .expect("config writes");
+}
+
 fn build_fixture_without_admin_bind() -> AdminFixture {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = write_config_without_admin_bind(&tmp);
@@ -1275,6 +1304,11 @@ fn remote_signed_tuf_apply_request(signed: &SignedConfigFixture, server: &MockSe
 
 async fn serve_signed_tuf_fixture(signed: &SignedConfigFixture) -> MockServer {
     let server = MockServer::start().await;
+    mount_signed_tuf_fixture(&server, signed).await;
+    server
+}
+
+async fn mount_signed_tuf_fixture(server: &MockServer, signed: &SignedConfigFixture) {
     mount_directory_files(&server, "/metadata", &signed.metadata_dir).await;
     mount_directory_files(&server, "/targets", &signed.targets_dir).await;
     Mock::given(method("GET"))
@@ -1282,7 +1316,6 @@ async fn serve_signed_tuf_fixture(signed: &SignedConfigFixture) -> MockServer {
         .respond_with(ResponseTemplate::new(404))
         .mount(&server)
         .await;
-    server
 }
 
 async fn mount_directory_files(server: &MockServer, url_prefix: &str, dir: &Path) {
@@ -2829,7 +2862,8 @@ async fn config_apply_signed_tuf_stale_sequence_rejects_without_swapping() {
 
 #[tokio::test]
 async fn config_apply_remote_signed_tuf_target_swaps_runtime_snapshot() {
-    let fixture = build_fixture();
+    let server = MockServer::start().await;
+    let fixture = build_fixture_with_remote_tuf_repository(&server);
     let candidate = std::fs::read_to_string(&fixture.config_path)
         .expect("config reads")
         .replace("owner: Test Ministry", "owner: Remote Signed Ministry");
@@ -2841,7 +2875,7 @@ async fn config_apply_remote_signed_tuf_target_swaps_runtime_snapshot() {
         &["kid-a", "kid-b"],
     )
     .await;
-    let server = serve_signed_tuf_fixture(&signed).await;
+    mount_signed_tuf_fixture(&server, &signed).await;
 
     let response = post_admin_config(
         &fixture,
