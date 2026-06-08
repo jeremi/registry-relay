@@ -296,6 +296,35 @@ async fn server_with_formula_cells() -> TestServer {
     )
 }
 
+async fn server_with_restricted_aggregate_metadata(scopes: &[&str]) -> TestServer {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = tmp.path().join("aggregates_entity.yaml");
+    let config = AGGREGATE_CONFIG.replace(
+        "      - id: by_household_region\n",
+        "      - id: by_household_region\n        access:\n          metadata_scope: social_registry:region_metadata\n",
+    );
+    std::fs::write(&config_path, config).expect("write config");
+    let cfg = Arc::new(config::load(&config_path).expect("config loads"));
+    let registry = Arc::new(EntityRegistry::from_config(&cfg).expect("registry"));
+    let ctx = Arc::new(SessionContext::new());
+
+    register_households(&ctx);
+    register_individuals(&ctx);
+
+    let query = Arc::new(AggregateQueryEngine::new(
+        Arc::clone(&ctx),
+        Arc::clone(&registry),
+        Arc::clone(&cfg),
+    ));
+
+    TestServer::new(
+        aggregates_router::<()>()
+            .layer(Extension(query))
+            .layer(Extension(registry))
+            .layer(Extension(principal(scopes))),
+    )
+}
+
 async fn protected_router_with_aggregates() -> TestServer {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = tmp.path().join("aggregates_entity.yaml");
@@ -470,6 +499,51 @@ async fn lists_dataset_indicator_and_dimension_discovery() {
     let body: Value = dimension.json();
     assert_eq!(body["id"], "municipality_code");
     assert_eq!(body["field"], "municipality_code");
+}
+
+#[tokio::test]
+async fn aggregate_discovery_filters_by_aggregate_metadata_scope() {
+    let server = server_with_restricted_aggregate_metadata(&[
+        "social_registry:metadata",
+        "social_registry:aggregate",
+    ])
+    .await;
+
+    let aggregates = server.get("/v1/datasets/social_registry/aggregates").await;
+    aggregates.assert_status_ok();
+    let body: Value = aggregates.json();
+    let data = body["data"].as_array().expect("aggregate data");
+    assert_eq!(data.len(), 3);
+    assert!(
+        !data
+            .iter()
+            .any(|item| item["aggregate_id"] == "by_household_region"),
+        "aggregate list must omit aggregate-specific metadata the principal lacks"
+    );
+
+    let indicators = server.get("/v1/datasets/social_registry/indicators").await;
+    indicators.assert_status_ok();
+    let body: Value = indicators.json();
+    let individual_count = body["data"]
+        .as_array()
+        .expect("indicator data")
+        .iter()
+        .find(|item| item["id"] == "individual_count")
+        .expect("individual count indicator");
+    assert_eq!(
+        individual_count["valid_dimensions"],
+        json!(["municipality_code"])
+    );
+    assert!(individual_count["aggregates"]
+        .as_array()
+        .expect("aggregates")
+        .iter()
+        .all(|item| item["aggregate_id"] != "by_household_region"));
+
+    let hidden_dimension = server
+        .get("/v1/datasets/social_registry/dimensions/household_region")
+        .await;
+    hidden_dimension.assert_status_bad_request();
 }
 
 #[tokio::test]
