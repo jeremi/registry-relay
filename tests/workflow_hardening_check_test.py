@@ -7,6 +7,8 @@ from pathlib import Path
 def load_module():
     path = Path(__file__).resolve().parents[1] / "scripts" / "check_workflow_hardening.py"
     spec = importlib.util.spec_from_file_location("check_workflow_hardening", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load module spec from {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
