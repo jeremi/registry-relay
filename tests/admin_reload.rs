@@ -1302,19 +1302,13 @@ fn remote_signed_tuf_apply_request(signed: &SignedConfigFixture, server: &MockSe
     })
 }
 
-async fn serve_signed_tuf_fixture(signed: &SignedConfigFixture) -> MockServer {
-    let server = MockServer::start().await;
-    mount_signed_tuf_fixture(&server, signed).await;
-    server
-}
-
 async fn mount_signed_tuf_fixture(server: &MockServer, signed: &SignedConfigFixture) {
-    mount_directory_files(&server, "/metadata", &signed.metadata_dir).await;
-    mount_directory_files(&server, "/targets", &signed.targets_dir).await;
+    mount_directory_files(server, "/metadata", &signed.metadata_dir).await;
+    mount_directory_files(server, "/targets", &signed.targets_dir).await;
     Mock::given(method("GET"))
         .and(path("/metadata/2.root.json"))
         .respond_with(ResponseTemplate::new(404))
-        .mount(&server)
+        .mount(server)
         .await;
 }
 

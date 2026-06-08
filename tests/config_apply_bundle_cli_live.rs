@@ -74,10 +74,6 @@ fn tough_fixture(name: &str) -> PathBuf {
     registry.join("tough-0.22.0/tests/data").join(name)
 }
 
-fn current_config_yaml(tmp: &TempDir, public_bind: SocketAddr, admin_bind: SocketAddr) -> String {
-    config_yaml(tmp, public_bind, admin_bind, false)
-}
-
 fn current_config_yaml_with_remote_tuf_repository(
     tmp: &TempDir,
     public_bind: SocketAddr,
@@ -445,19 +441,13 @@ fn remote_apply_bundle_command(
     command
 }
 
-async fn serve_signed_tuf_fixture(signed: &SignedConfigFixture) -> MockServer {
-    let server = MockServer::start().await;
-    mount_signed_tuf_fixture(&server, signed).await;
-    server
-}
-
 async fn mount_signed_tuf_fixture(server: &MockServer, signed: &SignedConfigFixture) {
-    mount_directory_files(&server, "/metadata", &signed.metadata_dir).await;
-    mount_directory_files(&server, "/targets", &signed.targets_dir).await;
+    mount_directory_files(server, "/metadata", &signed.metadata_dir).await;
+    mount_directory_files(server, "/targets", &signed.targets_dir).await;
     Mock::given(method("GET"))
         .and(path("/metadata/2.root.json"))
         .respond_with(ResponseTemplate::new(404))
-        .mount(&server)
+        .mount(server)
         .await;
 }
 
