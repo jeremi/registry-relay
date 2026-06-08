@@ -506,6 +506,43 @@ async fn spdci_routes_enforce_entity_required_filter_gate() {
 }
 
 #[tokio::test]
+async fn spdci_required_filter_gate_rejects_broad_predicates() {
+    let server =
+        try_server_with_entity_api_extra("          required_filters: [impairment_type]\n")
+            .await
+            .expect("test server builds");
+
+    let response = server
+        .post("/dci/dr/registry/sync/search")
+        .json(&json!({
+            "header": valid_header("msg-required-broad-predicate"),
+            "message": {
+                "transaction_id": "txn-required-broad-predicate",
+                "search_request": [{
+                    "reference_id": "ref-required-broad-predicate",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "search_criteria": {
+                        "query_type": "predicate",
+                        "query": [{
+                            "seq_num": 1,
+                            "expression1": {
+                                "attribute_name": "disability_details.impairment_type",
+                                "operator": "in",
+                                "attribute_value": ["mobility", "vision"]
+                            }
+                        }]
+                    }
+                }]
+            }
+        }))
+        .await;
+
+    response.assert_status(StatusCode::BAD_REQUEST);
+    let body: Value = response.json();
+    assert_eq!(body["code"], "entity.filter_required");
+}
+
+#[tokio::test]
 async fn sync_search_rejects_request_without_header() {
     let server = server().await;
     let response = server

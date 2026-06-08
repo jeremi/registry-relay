@@ -28,7 +28,10 @@ use crate::entity::EntityModel;
 use crate::error::{
     AuthError, EntityError, Error, FilterError, InternalError, SchemaError, SpdciError,
 };
-use crate::query::{EntityCollectionQuery, EntityFilter, EntityFilterOp, EntityQueryEngine};
+use crate::query::{
+    satisfies_required_filter, EntityCollectionQuery, EntityFilter, EntityFilterOp,
+    EntityQueryEngine,
+};
 use crate::runtime_config::RuntimeSnapshot;
 use crate::spdci::SpdciResponseMapper;
 
@@ -124,7 +127,14 @@ async fn run_disabled_status(
     require_scope_for(principal, &route.entity.access.evidence_verification_scope)?;
     require_entity_route_gates(&route.entity, &headers)?;
     let request = SpdciRequest::from_body(body, &route.config)?;
-    require_entity_filters(&route.entity, &[route.config.query_field.as_str()])?;
+    require_entity_filters_for_query(
+        &route.entity,
+        &[EntityFilter {
+            field: route.config.query_field.clone(),
+            op: EntityFilterOp::Eq,
+            value: request.query_value.clone(),
+        }],
+    )?;
     let rows = read_rows(route, &request, Some(projected_status_fields(route))).await?;
     let row_count = rows.len() as u64;
     let disabled = rows.first().is_some_and(|row| {
@@ -289,7 +299,14 @@ async fn run_search_response(
     require_scope_for(principal, &route.entity.access.read_scope)?;
     require_entity_route_gates(&route.entity, &headers)?;
     let request = SpdciRequest::from_body(body, &route.config)?;
-    require_entity_filters(&route.entity, &[route.config.query_field.as_str()])?;
+    require_entity_filters_for_query(
+        &route.entity,
+        &[EntityFilter {
+            field: route.config.query_field.clone(),
+            op: EntityFilterOp::Eq,
+            value: request.query_value.clone(),
+        }],
+    )?;
     let rows = read_rows(route, &request, None).await?;
     let row_count = rows.len() as u64;
     let reg_records =
@@ -875,25 +892,13 @@ fn require_entity_filters_for_query(
     entity: &EntityModel,
     filters: &[EntityFilter],
 ) -> Result<(), Error> {
-    let fields = filters
-        .iter()
-        .map(|filter| filter.field.as_str())
-        .collect::<Vec<_>>();
-    require_entity_filters(entity, &fields)
-}
-
-fn require_entity_filters(entity: &EntityModel, fields: &[&str]) -> Result<(), Error> {
     if entity.api.required_filters.is_empty() {
         return Ok(());
     }
-    let satisfied = fields.iter().any(|field| {
-        entity
-            .api
-            .required_filters
-            .iter()
-            .any(|required| required == field)
-    });
-    if satisfied {
+    if filters
+        .iter()
+        .any(|filter| satisfies_required_filter(&entity.api.required_filters, filter))
+    {
         return Ok(());
     }
     Err(EntityError::FilterRequired {
