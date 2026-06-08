@@ -965,6 +965,47 @@ fn postgres_configured_sql_rejects_quoted_session_state_functions() {
 }
 
 #[test]
+fn postgres_configured_sql_rejects_escape_string_bypass() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tmp,
+        &minimal_config(
+            r#"
+  - id: social_registry
+    title: Social Registry
+    description: Synthetic registry
+    owner: Test
+    sensitivity: personal
+    access_rights: restricted
+    update_frequency: monthly
+    tables:
+      - id: records_table
+        materialization: snapshot
+        source:
+          type: postgres
+          connection_env: SOCIAL_REGISTRY_DATABASE_URL
+          change_token_sql: "select E'foo\\' ' from pg_sleep(10)"
+          table:
+            schema: public
+            name: records
+        refresh:
+          mode: mtime
+          interval: 5m
+        schema:
+          strict: false
+          fields:
+            - name: record_id
+              type: string
+    entities: []
+"#,
+        ),
+    );
+
+    let msg = assert_config_code(config::load(&config_path), "config.validation_error");
+    assert!(!msg.contains("pg_sleep"), "query leaked in error: {msg}");
+}
+
+#[test]
 fn postgres_configured_sql_allows_disallowed_words_inside_strings() {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = write_config(

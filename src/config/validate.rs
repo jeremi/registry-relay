@@ -2151,6 +2151,7 @@ fn postgres_sql_tokens(sql: &str) -> Vec<String> {
     let mut current = String::new();
     let mut chars = sql.chars().peekable();
     let mut in_single_quote = false;
+    let mut is_escape_quote = false;
     let mut in_line_comment = false;
     let mut in_block_comment = false;
 
@@ -2169,11 +2170,14 @@ fn postgres_sql_tokens(sql: &str) -> Vec<String> {
             continue;
         }
         if in_single_quote {
-            if ch == '\'' {
+            if is_escape_quote && ch == '\\' {
+                chars.next();
+            } else if ch == '\'' {
                 if chars.peek() == Some(&'\'') {
                     chars.next();
                 } else {
                     in_single_quote = false;
+                    is_escape_quote = false;
                 }
             }
             continue;
@@ -2190,6 +2194,7 @@ fn postgres_sql_tokens(sql: &str) -> Vec<String> {
                 in_block_comment = true;
             }
             '\'' => {
+                is_escape_quote = current.eq_ignore_ascii_case("e");
                 push_postgres_sql_token(&mut tokens, &mut current);
                 in_single_quote = true;
             }
