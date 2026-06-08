@@ -25,7 +25,9 @@ use crate::auth::scopes::require_scope;
 use crate::auth::Principal;
 use crate::config::{Config, SpdciDisabilityRegistryConfig, SpdciRegistryConfig};
 use crate::entity::EntityModel;
-use crate::error::{AuthError, Error, FilterError, InternalError, SchemaError, SpdciError};
+use crate::error::{
+    AuthError, EntityError, Error, FilterError, InternalError, SchemaError, SpdciError,
+};
 use crate::query::{EntityCollectionQuery, EntityFilter, EntityFilterOp, EntityQueryEngine};
 use crate::runtime_config::RuntimeSnapshot;
 use crate::spdci::SpdciResponseMapper;
@@ -39,6 +41,7 @@ const REQUIRED_HEADER_FIELDS: &[&str] = &[
     "sender_id",
     "total_count",
 ];
+const DATA_PURPOSE_HEADER: &str = "data-purpose";
 
 struct RouteDeps {
     runtime: RuntimeSnapshot,
@@ -119,7 +122,9 @@ async fn run_disabled_status(
     body: Value,
 ) -> Result<(Response, u64), Error> {
     require_scope_for(principal, &route.entity.access.evidence_verification_scope)?;
+    require_entity_route_gates(&route.entity, &headers)?;
     let request = SpdciRequest::from_body(body, &route.config)?;
+    require_entity_filters(&route.entity, &[route.config.query_field.as_str()])?;
     let rows = read_rows(route, &request, Some(projected_status_fields(route))).await?;
     let row_count = rows.len() as u64;
     let disabled = rows.first().is_some_and(|row| {
@@ -177,7 +182,11 @@ async fn run_sync_search_response(
     body: Value,
 ) -> Result<(Response, u64), Error> {
     require_scope_for(principal, &route.entity.access.read_scope)?;
+    require_entity_route_gates(&route.entity, &headers)?;
     let request = SearchRequest::from_body(body, &route.config)?;
+    for item in &request.items {
+        require_entity_filters_for_query(&route.entity, &item.filters)?;
+    }
     let mut search_response = Vec::with_capacity(request.items.len());
     let mut total_count = 0_u64;
     for item in request.items {
@@ -278,7 +287,9 @@ async fn run_search_response(
     body: Value,
 ) -> Result<(Response, u64), Error> {
     require_scope_for(principal, &route.entity.access.read_scope)?;
+    require_entity_route_gates(&route.entity, &headers)?;
     let request = SpdciRequest::from_body(body, &route.config)?;
+    require_entity_filters(&route.entity, &[route.config.query_field.as_str()])?;
     let rows = read_rows(route, &request, None).await?;
     let row_count = rows.len() as u64;
     let reg_records =
@@ -831,6 +842,52 @@ fn require_scope_for(principal: Option<Extension<Principal>>, required: &str) ->
         return Err(AuthError::MissingCredential.into());
     };
     require_scope(&principal, required)
+}
+
+fn require_entity_route_gates(entity: &EntityModel, headers: &HeaderMap) -> Result<(), Error> {
+    if entity.api.require_purpose_header && !has_purpose_header(headers) {
+        return Err(AuthError::PurposeRequired.into());
+    }
+    Ok(())
+}
+
+fn require_entity_filters_for_query(
+    entity: &EntityModel,
+    filters: &[EntityFilter],
+) -> Result<(), Error> {
+    let fields = filters
+        .iter()
+        .map(|filter| filter.field.as_str())
+        .collect::<Vec<_>>();
+    require_entity_filters(entity, &fields)
+}
+
+fn require_entity_filters(entity: &EntityModel, fields: &[&str]) -> Result<(), Error> {
+    if entity.api.required_filters.is_empty() {
+        return Ok(());
+    }
+    let satisfied = fields.iter().any(|field| {
+        entity
+            .api
+            .required_filters
+            .iter()
+            .any(|required| required == field)
+    });
+    if satisfied {
+        return Ok(());
+    }
+    Err(EntityError::FilterRequired {
+        required: entity.api.required_filters.clone(),
+    }
+    .into())
+}
+
+fn has_purpose_header(headers: &HeaderMap) -> bool {
+    headers
+        .get(DATA_PURPOSE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
 }
 
 fn spdci_envelope_with_count(
