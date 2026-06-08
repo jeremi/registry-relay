@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use crate::audit::{AuditContextExt, ErrorCodeExt};
 use crate::auth::scopes::require_scope;
 use crate::auth::Principal;
-use crate::config::DatasetConfig;
+use crate::config::{DatasetConfig, EntityConfig};
 use crate::error::{AuthError, Error, FilterError, SchemaError};
 use crate::ingest::ReadinessSnapshot;
 use crate::query::{AggregateFilter, AggregateFilterOp, AggregateQueryRequest, AggregateResult};
@@ -140,7 +140,12 @@ async fn aggregate_metadata(
     };
     let aggregate = match query.aggregate_config(&path.dataset_id, &path.aggregate_id) {
         Ok((dataset, aggregate)) => {
-            if let Err(error) = require_metadata_scope(principal, &path.dataset_id, Some(aggregate))
+            if let Err(error) =
+                require_metadata_scope(principal.clone(), &path.dataset_id, Some(aggregate))
+            {
+                return error.into_response();
+            }
+            if let Err(error) = require_source_entity_metadata_scope(principal, dataset, aggregate)
             {
                 return error.into_response();
             }
@@ -312,7 +317,12 @@ async fn run_aggregate(
     if let Err(error) = require_purpose_header(dataset, aggregate, &headers) {
         return error.into_response();
     }
-    if let Err(error) = require_aggregate_scope(principal, &path.dataset_id, Some(aggregate)) {
+    if let Err(error) =
+        require_aggregate_scope(principal.clone(), &path.dataset_id, Some(aggregate))
+    {
+        return error.into_response();
+    }
+    if let Err(error) = require_source_entity_read_scope(principal, dataset, aggregate) {
         return error.into_response();
     }
     let format = body.format.clone().unwrap_or_else(|| "json".to_string());
@@ -571,7 +581,13 @@ fn filter_visible_aggregates(
 ) -> Vec<crate::query::aggregates::AggregateListItem> {
     aggregates
         .into_iter()
-        .filter(|aggregate| principal_has_scope(principal, &aggregate.metadata_scope))
+        .filter(|aggregate| {
+            principal_has_scope(principal, &aggregate.metadata_scope)
+                && aggregate
+                    .source_entity_metadata_scope
+                    .as_deref()
+                    .is_none_or(|scope| principal_has_scope(principal, scope))
+        })
         .collect()
 }
 
@@ -594,6 +610,11 @@ fn aggregate_metadata_json(
             .as_ref()
             .and_then(|access| access.metadata_scope.clone())
             .unwrap_or_else(|| format!("{}:metadata", dataset.id)),
+        source_entity_metadata_scope: aggregate
+            .source_entity
+            .as_deref()
+            .and_then(|name| dataset.entities.iter().find(|entity| entity.name == name))
+            .map(|entity| entity.access.metadata_scope.clone()),
         dimensions: aggregate
             .dimensions
             .iter()
@@ -967,14 +988,9 @@ fn require_purpose_header(
     aggregate: &crate::config::AggregateConfig,
     headers: &HeaderMap,
 ) -> Result<(), Error> {
-    let Some(source_entity) = aggregate.source_entity.as_deref() else {
-        return Err(SchemaError::UnknownAggregate.into());
-    };
-    let require = dataset
-        .entities
-        .iter()
-        .find(|entity| entity.name == source_entity)
-        .is_some_and(|entity| entity.api.require_purpose_header);
+    let require = source_entity(dataset, aggregate)?
+        .api
+        .require_purpose_header;
     if !require {
         return Ok(());
     }
@@ -987,6 +1003,42 @@ fn require_purpose_header(
     } else {
         Err(AuthError::PurposeRequired.into())
     }
+}
+
+fn require_source_entity_metadata_scope(
+    principal: Option<Extension<Principal>>,
+    dataset: &DatasetConfig,
+    aggregate: &crate::config::AggregateConfig,
+) -> Result<(), Error> {
+    require_principal_scope(
+        principal,
+        &source_entity(dataset, aggregate)?.access.metadata_scope,
+    )
+}
+
+fn require_source_entity_read_scope(
+    principal: Option<Extension<Principal>>,
+    dataset: &DatasetConfig,
+    aggregate: &crate::config::AggregateConfig,
+) -> Result<(), Error> {
+    require_principal_scope(
+        principal,
+        &source_entity(dataset, aggregate)?.access.read_scope,
+    )
+}
+
+fn source_entity<'a>(
+    dataset: &'a DatasetConfig,
+    aggregate: &crate::config::AggregateConfig,
+) -> Result<&'a EntityConfig, Error> {
+    let Some(source_entity) = aggregate.source_entity.as_deref() else {
+        return Err(SchemaError::UnknownAggregate.into());
+    };
+    dataset
+        .entities
+        .iter()
+        .find(|entity| entity.name == source_entity)
+        .ok_or_else(|| SchemaError::UnknownAggregate.into())
 }
 
 fn resolve_as_of_rfc3339(

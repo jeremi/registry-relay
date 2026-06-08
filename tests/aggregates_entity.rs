@@ -238,6 +238,15 @@ audit:
 "#;
 
 async fn server_with_aggregates() -> TestServer {
+    server_with_aggregate_scopes(&[
+        "social_registry:metadata",
+        "social_registry:aggregate",
+        "social_registry:rows",
+    ])
+    .await
+}
+
+async fn server_with_aggregate_scopes(scopes: &[&str]) -> TestServer {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = tmp.path().join("aggregates_entity.yaml");
     std::fs::write(&config_path, AGGREGATE_CONFIG).expect("write config");
@@ -258,10 +267,7 @@ async fn server_with_aggregates() -> TestServer {
         aggregates_router::<()>()
             .layer(Extension(query))
             .layer(Extension(registry))
-            .layer(Extension(principal(&[
-                "social_registry:metadata",
-                "social_registry:aggregate",
-            ]))),
+            .layer(Extension(principal(scopes))),
     )
 }
 
@@ -292,6 +298,7 @@ async fn server_with_formula_cells() -> TestServer {
             .layer(Extension(principal(&[
                 "social_registry:metadata",
                 "social_registry:aggregate",
+                "social_registry:rows",
             ]))),
     )
 }
@@ -354,6 +361,7 @@ async fn protected_router_with_aggregates() -> TestServer {
         .layer(Extension(principal(&[
             "social_registry:metadata",
             "social_registry:aggregate",
+            "social_registry:rows",
         ])));
 
     TestServer::new(app)
@@ -506,6 +514,7 @@ async fn aggregate_discovery_filters_by_aggregate_metadata_scope() {
     let server = server_with_restricted_aggregate_metadata(&[
         "social_registry:metadata",
         "social_registry:aggregate",
+        "social_registry:rows",
     ])
     .await;
 
@@ -544,6 +553,20 @@ async fn aggregate_discovery_filters_by_aggregate_metadata_scope() {
         .get("/v1/datasets/social_registry/dimensions/household_region")
         .await;
     hidden_dimension.assert_status_bad_request();
+}
+
+#[tokio::test]
+async fn aggregate_execution_requires_source_entity_read_scope() {
+    let server =
+        server_with_aggregate_scopes(&["social_registry:metadata", "social_registry:aggregate"])
+            .await;
+
+    let resp = server
+        .get("/v1/datasets/social_registry/aggregates/by_municipality")
+        .await;
+
+    resp.assert_status_forbidden();
+    assert_eq!(resp.json::<Value>()["code"], "auth.scope_denied");
 }
 
 #[tokio::test]
