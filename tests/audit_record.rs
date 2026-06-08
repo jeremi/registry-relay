@@ -1210,3 +1210,18 @@ async fn middleware_falls_back_to_peer_without_x_forwarded_for() {
             .await;
     assert_eq!(remote_addr, "10.1.2.3");
 }
+
+#[tokio::test]
+async fn middleware_falls_back_to_peer_when_full_forwarded_chain_is_trusted() {
+    // Every hop (the injected X-Forwarded-For entry and the socket peer) sits
+    // inside the trusted range, so there is no untrusted hop to select. The
+    // resolver must record the authentic peer, not the attacker-injected
+    // leftmost X-Forwarded-For value.
+    let remote_addr = remote_addr_from_x_forwarded_for(
+        Some("10.99.99.99"),
+        "10.1.2.3:12345",
+        vec!["10.0.0.0/8".to_string()],
+    )
+    .await;
+    assert_eq!(remote_addr, "10.1.2.3");
+}

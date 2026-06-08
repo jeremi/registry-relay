@@ -661,8 +661,10 @@ pub async fn audit_layer(
     // `ConnectInfo` is propagated by axum when the server is started with
     // `into_make_service_with_connect_info`. In unit tests using
     // `oneshot`, no such extension is present, so we fall back to
-    // unspecified. When trust-proxy support is enabled, a trusted socket
-    // peer may project the first `X-Forwarded-For` address into audit.
+    // unspecified. When trust-proxy support is enabled and the socket peer
+    // is trusted, audit records the rightmost `X-Forwarded-For` hop that is
+    // not itself a trusted proxy, falling back to the socket peer when every
+    // hop in the chain is trusted.
     let remote_addr = resolve_remote_addr(
         &headers,
         request
@@ -1005,7 +1007,7 @@ fn resolve_remote_addr(
                 .rev()
                 .find(|hop| !trusted_proxy_contains(**hop, &settings.trusted_proxies))
                 .copied()
-                .unwrap_or_else(|| chain[0])
+                .unwrap_or(peer)
         })
         .unwrap_or(peer)
 }
