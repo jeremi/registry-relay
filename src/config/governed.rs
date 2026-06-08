@@ -261,11 +261,7 @@ pub fn parse_resolved_config_candidate_with_provenance(
     let mut provenance = ConfigProvenance {
         source: candidate.source,
         internal_config_hash: internal_hash.clone(),
-        posture_config_hash: if metadata_source_digest.is_some() || package_digest.is_some() {
-            internal_hash
-        } else {
-            posture_safe_runtime_config_hash(&config_value)
-        },
+        posture_config_hash: posture_safe_runtime_config_hash(&config_value),
         dynamic_reload_supported: true,
         last_bundle_id: Some(candidate.bundle_id.clone()),
         last_bundle_sequence: Some(candidate.sequence),

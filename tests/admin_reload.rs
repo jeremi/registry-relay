@@ -14,7 +14,7 @@ use chrono::Utc;
 use datafusion::execution::context::SessionContext;
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
-use registry_manifest_core::{source_manifest_digest, MetadataManifest};
+use registry_manifest_core::{canonicalize_json, source_manifest_digest, MetadataManifest};
 use registry_platform_authcommon::{
     credential_fingerprint_commitment, CredentialCommitmentContext, CredentialProduct,
     CredentialType,
@@ -2713,6 +2713,31 @@ async fn config_apply_signed_metadata_package_swaps_compiled_metadata() {
         posture["relay"]["metadata_manifest"]["source_digest"],
         source_digest
     );
+    let config_value: Value = serde_saphyr::from_str(&candidate).expect("candidate parses");
+    let posture_safe_hash = posture_safe_runtime_config_hash(&config_value);
+    let package_config_hash = {
+        let config: Config = serde_saphyr::from_str(&candidate).expect("candidate config parses");
+        let preimage = json!({
+            "schema_version": "registry-runtime-package/v1",
+            "product": "registry-relay",
+            "instance_id": config.instance.id,
+            "environment": config.instance.environment.as_deref().unwrap_or("development"),
+            "runtime_config_digest": internal_config_hash(candidate.as_bytes()),
+            "source": "signed_bundle_file",
+            "source_manifest_digest": source_digest,
+        });
+        let bytes =
+            canonicalize_json(&preimage).expect("package config hash preimage canonicalizes");
+        internal_config_hash(&bytes)
+    };
+    assert_eq!(
+        posture["configuration"]["last_config_hash"],
+        posture_safe_hash
+    );
+    assert_ne!(posture_safe_hash, package_config_hash);
+    let raw_posture = serde_json::to_string(&posture).expect("posture serializes");
+    assert!(!raw_posture.contains(&package_config_hash));
+    assert!(!raw_posture.contains(&internal_config_hash(candidate.as_bytes())));
 }
 
 #[tokio::test]
