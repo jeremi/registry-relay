@@ -1554,7 +1554,9 @@ fn is_https_or_dev_loopback_url(url: &str, allow_dev_insecure_fetch_urls: bool) 
 }
 
 fn is_loopback_ip(host: &str) -> bool {
-    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    host.trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn validate_scopes(config: &Config) -> Result<(), ConfigError> {
@@ -3438,6 +3440,31 @@ mod tests {
         assert!(!is_trusted_proxy_spec("not-an-ip"));
         assert!(!is_trusted_proxy_spec("10.0.0.0/99"));
         assert!(!is_trusted_proxy_spec("2001:db8::/129"));
+    }
+
+    #[test]
+    fn oidc_dev_http_url_exception_requires_parsed_loopback_host() {
+        assert!(is_allowed_oidc_url("http://127.0.0.1:8080/jwks", true));
+        assert!(is_allowed_oidc_url("http://[::1]:8080/jwks", true));
+        assert!(is_allowed_oidc_url(
+            "http://localhost/.well-known/openid-configuration",
+            true
+        ));
+
+        assert!(!is_allowed_oidc_url(
+            "http://127.0.0.1:80@evil.example/jwks",
+            true
+        ));
+        assert!(!is_allowed_oidc_url(
+            "http://localhost:pw@evil.example/jwks",
+            true
+        ));
+        assert!(!is_allowed_oidc_url("http://10.0.0.1/jwks", true));
+        assert!(!is_allowed_oidc_url("http://evil.example/jwks", true));
+        assert!(!is_allowed_oidc_url(
+            "https://user:pw@idp.example.test/jwks",
+            false
+        ));
     }
 
     fn provenance_with_retired_verification_method(retired_vm_id: &str) -> ProvenanceConfig {
