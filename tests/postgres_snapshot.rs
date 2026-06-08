@@ -118,7 +118,10 @@ VALUES
         .batch_execute(&format!(r#"DROP SCHEMA "{schema_name}" CASCADE"#))
         .await?;
 
-    result?;
+    assert!(
+        result.is_err(),
+        "mutating change_token_sql must fail before deleting rows"
+    );
     assert_eq!(count, 1, "read-only connector session must not delete rows");
     Ok(())
 }
