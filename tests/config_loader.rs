@@ -845,6 +845,123 @@ fn postgres_configured_sql_rejects_semicolons() {
 }
 
 #[test]
+fn postgres_configured_sql_rejects_data_modifying_cte() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tmp,
+        &minimal_config(
+            r#"
+  - id: social_registry
+    title: Social Registry
+    description: Synthetic registry
+    owner: Test
+    sensitivity: personal
+    access_rights: restricted
+    update_frequency: monthly
+    tables:
+      - id: records_table
+        materialization: snapshot
+        source:
+          type: postgres
+          connection_env: SOCIAL_REGISTRY_DATABASE_URL
+          query: "with changed as (update public.records set exported = true returning record_id) select record_id from changed"
+        refresh:
+          mode: interval
+          interval: 5m
+        schema:
+          strict: false
+          fields:
+            - name: record_id
+              type: string
+    entities: []
+"#,
+        ),
+    );
+
+    let msg = assert_config_code(config::load(&config_path), "config.validation_error");
+    assert!(!msg.contains("changed"), "query leaked in error: {msg}");
+}
+
+#[test]
+fn postgres_configured_sql_rejects_session_state_changes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tmp,
+        &minimal_config(
+            r#"
+  - id: social_registry
+    title: Social Registry
+    description: Synthetic registry
+    owner: Test
+    sensitivity: personal
+    access_rights: restricted
+    update_frequency: monthly
+    tables:
+      - id: records_table
+        materialization: snapshot
+        source:
+          type: postgres
+          connection_env: SOCIAL_REGISTRY_DATABASE_URL
+          change_token_sql: "select set_config('default_transaction_read_only', 'off', false)"
+          table:
+            schema: public
+            name: records
+        refresh:
+          mode: mtime
+          interval: 5m
+        schema:
+          strict: false
+          fields:
+            - name: record_id
+              type: string
+    entities: []
+"#,
+        ),
+    );
+
+    let msg = assert_config_code(config::load(&config_path), "config.validation_error");
+    assert!(!msg.contains("set_config"), "query leaked in error: {msg}");
+}
+
+#[test]
+fn postgres_configured_sql_allows_disallowed_words_inside_strings() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_path = write_config(
+        &tmp,
+        &minimal_config(
+            r#"
+  - id: social_registry
+    title: Social Registry
+    description: Synthetic registry
+    owner: Test
+    sensitivity: personal
+    access_rights: restricted
+    update_frequency: monthly
+    tables:
+      - id: records_table
+        materialization: snapshot
+        source:
+          type: postgres
+          connection_env: SOCIAL_REGISTRY_DATABASE_URL
+          query: "select 'update' as record_id from public.records"
+        refresh:
+          mode: interval
+          interval: 5m
+        primary_key: record_id
+        schema:
+          strict: false
+          fields:
+            - name: record_id
+              type: string
+    entities: []
+"#,
+        ),
+    );
+
+    config::load(&config_path).expect("quoted text does not fail read-only validation");
+}
+
+#[test]
 fn file_source_live_materialization_is_rejected() {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = write_config(

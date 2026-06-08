@@ -2090,7 +2090,139 @@ fn validate_configured_postgres_query(
         return Err(ConfigError::ValidationError);
     }
 
+    if postgres_configured_sql_has_disallowed_token(trimmed) {
+        tracing::error!(
+            code = "config.validation_error",
+            dataset_id = %dataset.id,
+            resource_id = resource.map(|r| r.id.as_str()).unwrap_or("<dataset>"),
+            connection_env = %connection_env,
+            "postgres configured SQL must be read-only and must not change session state"
+        );
+        return Err(ConfigError::ValidationError);
+    }
+
     Ok(())
+}
+
+fn postgres_configured_sql_has_disallowed_token(sql: &str) -> bool {
+    const DISALLOWED: &[&str] = &[
+        "alter",
+        "analyze",
+        "begin",
+        "call",
+        "cluster",
+        "commit",
+        "copy",
+        "create",
+        "delete",
+        "drop",
+        "execute",
+        "grant",
+        "insert",
+        "listen",
+        "load",
+        "lock",
+        "merge",
+        "nextval",
+        "notify",
+        "perform",
+        "pg_advisory_lock",
+        "pg_read_binary_file",
+        "pg_read_file",
+        "pg_sleep",
+        "refresh",
+        "reindex",
+        "reset",
+        "revoke",
+        "rollback",
+        "set",
+        "set_config",
+        "truncate",
+        "update",
+        "vacuum",
+    ];
+    postgres_sql_tokens(sql)
+        .iter()
+        .any(|token| DISALLOWED.contains(&token.as_str()))
+}
+
+fn postgres_sql_tokens(sql: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if in_single_quote {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            continue;
+        }
+        if in_double_quote {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                } else {
+                    in_double_quote = false;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                push_postgres_sql_token(&mut tokens, &mut current);
+                in_line_comment = true;
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                push_postgres_sql_token(&mut tokens, &mut current);
+                in_block_comment = true;
+            }
+            '\'' => {
+                push_postgres_sql_token(&mut tokens, &mut current);
+                in_single_quote = true;
+            }
+            '"' => {
+                push_postgres_sql_token(&mut tokens, &mut current);
+                in_double_quote = true;
+            }
+            ch if ch.is_ascii_alphanumeric() || ch == '_' => {
+                current.push(ch.to_ascii_lowercase());
+            }
+            _ => push_postgres_sql_token(&mut tokens, &mut current),
+        }
+    }
+    push_postgres_sql_token(&mut tokens, &mut current);
+    tokens
+}
+
+fn push_postgres_sql_token(tokens: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        tokens.push(std::mem::take(current));
+    }
 }
 
 fn validate_materialization_refresh(
