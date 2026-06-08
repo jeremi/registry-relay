@@ -283,10 +283,15 @@ Use `?tier=restricted` only for trusted operations users who need the restricted
 Governed config routes require a token with the independent `registry_relay:admin` scope:
 
 ```text
+POST /admin/reload
 POST /admin/v1/config/verify
 POST /admin/v1/config/dry-run
 POST /admin/v1/config/apply
 ```
+
+Treat `registry_relay:admin` as deployment authority. A holder can validate,
+dry-run, apply, or reload runtime configuration, which can replace active data
+sources, trust roots, scopes, and provenance settings.
 
 `verify` and `dry-run` accept either inline `config_yaml` plus bundle metadata or a local signed TUF target reference. They validate the candidate and return:
 
