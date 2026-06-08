@@ -200,6 +200,7 @@ config_trust:
 }
 
 fn insert_remote_tuf_repository_yaml(yaml: &str, tmp: &TempDir, remote: &MockServer) -> String {
+    let repo_dir = tmp.path().join("signed-root-transition");
     let remote = format!(
         r#"  remote_tuf_repositories:
     - root_path: "{}"
@@ -208,10 +209,10 @@ fn insert_remote_tuf_repository_yaml(yaml: &str, tmp: &TempDir, remote: &MockSer
       datastore_dir: "{}"
       allow_dev_insecure_fetch_urls: true
 "#,
-        tmp.path().join("tuf/metadata/1.root.json").display(),
+        repo_dir.join("metadata/1.root.json").display(),
         remote.uri(),
         remote.uri(),
-        tmp.path().join("tuf/datastore").display()
+        repo_dir.join("datastore").display()
     );
     yaml.replace("  accepted_roots:\n", &(remote + "  accepted_roots:\n"))
 }

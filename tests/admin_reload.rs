@@ -916,6 +916,7 @@ fn build_fixture_with_remote_tuf_repository(server: &MockServer) -> AdminFixture
 
 fn insert_remote_tuf_repository(config_path: &Path, tmp: &TempDir, server: &MockServer) {
     let yaml = std::fs::read_to_string(config_path).expect("config reads");
+    let repo_dir = tmp.path().join("signed-config-5");
     let remote = format!(
         r#"  remote_tuf_repositories:
     - root_path: "{}"
@@ -924,10 +925,10 @@ fn insert_remote_tuf_repository(config_path: &Path, tmp: &TempDir, server: &Mock
       datastore_dir: "{}"
       allow_dev_insecure_fetch_urls: true
 "#,
-        tmp.path().join("tuf/metadata/1.root.json").display(),
+        repo_dir.join("metadata/1.root.json").display(),
         server.uri(),
         server.uri(),
-        tmp.path().join("tuf/datastore").display()
+        repo_dir.join("datastore").display()
     );
     std::fs::write(
         config_path,
