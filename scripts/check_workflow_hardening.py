@@ -12,6 +12,21 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 IMMUTABLE_REF = re.compile(r"^[0-9a-f]{40}$")
 
+# Forbidden ways of installing cargo-nextest in CI. The supply-chain rule is:
+# never fetch-and-extract an unverified archive. nextest must come from the
+# SHA-pinned taiki-e/install-action with `fallback: none`. These patterns catch
+# reintroductions via either a streamed download piped into tar, or a split
+# download-to-file followed by tar extraction (no checksum in between).
+NEXTEST_FORBIDDEN_PATTERNS: list[tuple[str, str]] = [
+    (r"get\.nexte\.st", "unchecked nextest installer"),
+    (r"curl\b[^\n|]*\|[^\n]*tar\b", "curl piped to tar"),
+    (r"wget\b[^\n|]*\|[^\n]*tar\b", "wget piped to tar"),
+    (
+        r"(?:curl|wget)\b[^\n]*?\s-(?:o|O|-output|-remote-name)\b[\s\S]{0,400}?\btar\b[^\n]*?\bx",
+        "split download piped to tar extraction",
+    ),
+]
+
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -112,8 +127,8 @@ def main() -> int:
 
     ci = WORKFLOWS / "ci.yml"
     ci_text = read(ci)
-    failures.extend(forbid(ci_text, r"get\.nexte\.st", ci, "unchecked nextest installer"))
-    failures.extend(forbid(ci_text, r"curl\b[^\n|]*\|[^\n]*tar\b", ci, "curl piped to tar"))
+    for pattern, detail in NEXTEST_FORBIDDEN_PATTERNS:
+        failures.extend(forbid(ci_text, pattern, ci, detail))
     failures.extend(
         require(
             ci_text,
