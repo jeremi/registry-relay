@@ -13,6 +13,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::error::{ConfigError, Error, RuntimeBindingError};
+use crate::table_provider::table_name;
 use registry_manifest_core::CompiledMetadata;
 use registry_platform_authcommon::{
     CredentialCommitmentContext, CredentialFingerprintRefError, CredentialProduct, CredentialType,
@@ -1166,6 +1167,7 @@ fn is_trusted_proxy_spec(s: &str) -> bool {
 
 fn validate_ids_and_uniqueness(config: &Config) -> Result<(), ConfigError> {
     let mut dataset_ids: HashSet<&str> = HashSet::new();
+    let mut datafusion_table_names: BTreeMap<String, (String, String)> = BTreeMap::new();
     for dataset in &config.datasets {
         if !is_valid_id(dataset.id.as_str()) {
             tracing::error!(
@@ -1246,6 +1248,22 @@ fn validate_ids_and_uniqueness(config: &Config) -> Result<(), ConfigError> {
                     dataset_id = %dataset.id,
                     resource_id = %resource.id,
                     "duplicate resource id within dataset"
+                );
+                return Err(ConfigError::DuplicateId);
+            }
+            let datafusion_table_name = table_name(&dataset.id, &resource.id);
+            if let Some((existing_dataset, existing_resource)) = datafusion_table_names.insert(
+                datafusion_table_name.clone(),
+                (dataset.id.to_string(), resource.id.to_string()),
+            ) {
+                tracing::error!(
+                    code = "config.duplicate_id",
+                    dataset_id = %dataset.id,
+                    resource_id = %resource.id,
+                    datafusion_table_name,
+                    existing_dataset,
+                    existing_resource,
+                    "duplicate derived DataFusion table name"
                 );
                 return Err(ConfigError::DuplicateId);
             }
