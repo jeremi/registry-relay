@@ -449,8 +449,11 @@ mod tests {
     use jsonwebtoken::{encode, EncodingKey, Header};
     use rand_core::OsRng;
     use serde_json::json;
+    use std::io;
+    use std::sync::Mutex;
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tracing_subscriber::fmt::MakeWriter;
 
     const TEST_ISSUER: &str = "https://idp.example.test/realms/demo";
     const TEST_AUDIENCE: &str = "registry-relay";
@@ -593,6 +596,33 @@ mod tests {
             .expect("payload serializes"),
         );
         format!("{header}.{payload}.")
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLog(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for SharedLog {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -941,6 +971,45 @@ mod tests {
         let provider = provider_from(base_config(), jwks_for(TEST_KID, &vk));
         let err = provider.verify(&token).await.expect_err("unknown kid");
         assert!(matches!(err, AuthError::KidUnknown), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn unknown_kid_text_logs_do_not_include_raw_kid() {
+        let (sk, vk) = fresh_keypair();
+        let raw_kid = "not-the-cached-kid\nforged=true";
+        let token = mint(
+            &sk,
+            TokenOpts {
+                kid: Some(raw_kid.to_string()),
+                ..Default::default()
+            },
+        );
+        let provider = provider_from(base_config(), jwks_for(TEST_KID, &vk));
+        let logs = SharedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_ansi(false)
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .finish();
+
+        let guard = tracing::subscriber::set_default(subscriber);
+        let err = provider.verify(&token).await.expect_err("unknown kid");
+        drop(guard);
+
+        assert!(matches!(err, AuthError::KidUnknown), "got {err:?}");
+        let rendered = String::from_utf8(logs.0.lock().expect("log buffer lock").clone())
+            .expect("logs are utf-8");
+        assert!(
+            rendered.contains("oidc: jwt validation failed"),
+            "expected validation diagnostic in logs: {rendered}"
+        );
+        assert!(!rendered.contains(raw_kid), "raw kid reached text logs");
+        assert!(
+            !rendered.contains("forged=true"),
+            "kid suffix reached text logs"
+        );
     }
 
     #[tokio::test]
