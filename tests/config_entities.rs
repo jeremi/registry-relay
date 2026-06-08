@@ -168,6 +168,16 @@ fn entity_access_scopes_must_be_bound_to_enclosing_dataset() {
     assert_eq!(err.code(), "config.validation_error");
 }
 
+#[test]
+fn entity_access_scopes_must_not_use_reserved_ops_namespace() {
+    let tmp = TempDir::new().expect("tempdir");
+    let invalid = valid_dataset().replace("id: social_registry", "id: registry_relay");
+    let config_path = write_config(&tmp, &base_config(&invalid));
+    let err = registry_relay::config::load(&config_path)
+        .expect_err("config rejects data-plane scope in reserved ops namespace");
+    assert_eq!(err.code(), "config.validation_error");
+}
+
 fn dataset_with_required_filters(required_filters: &str) -> String {
     format!(
         r#"

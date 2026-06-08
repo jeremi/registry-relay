@@ -30,6 +30,8 @@ use super::{
 
 /// Product-scoped admin capability required by private admin mutations.
 const ADMIN_SCOPE: &str = "registry_relay:admin";
+const OPS_READ_SCOPE: &str = "registry_relay:ops_read";
+const RESERVED_SCOPE_DATASET_IDS: &[&str] = &["registry_relay"];
 
 /// Run every cross-field check on a freshly deserialised [`Config`].
 ///
@@ -1606,6 +1608,17 @@ fn validate_entity_scope(
         );
         return Err(ConfigError::ValidationError);
     }
+    if RESERVED_SCOPE_DATASET_IDS.contains(&scope_dataset) {
+        tracing::error!(
+            code = "config.validation_error",
+            dataset_id = %dataset_id,
+            entity = %entity_name,
+            field = %field,
+            scope = %scope,
+            "entity access scope must not use a reserved operations scope namespace"
+        );
+        return Err(ConfigError::ValidationError);
+    }
     Ok(())
 }
 
@@ -1617,7 +1630,7 @@ fn validate_scope(
     if scope == ADMIN_SCOPE {
         return Ok(());
     }
-    if scope == "registry_relay:ops_read" {
+    if scope == OPS_READ_SCOPE {
         return Ok(());
     }
     let (dataset, level) = scope.split_once(':').ok_or_else(|| {
