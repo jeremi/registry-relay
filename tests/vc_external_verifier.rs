@@ -149,6 +149,43 @@ fn node_verifier_accepts_assertion_method_key() {
 }
 
 #[test]
+fn node_verifier_accepts_single_assertion_method_reference() {
+    let fixture = &FIXTURES[0];
+    let fixture_path = fixture_path(fixture);
+    let mut did: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture_path.join("did.json")).unwrap())
+            .expect("did fixture json");
+    let assertion = did["assertionMethod"]
+        .as_array()
+        .and_then(|values| values.first())
+        .cloned()
+        .expect("fixture has assertionMethod reference");
+    did["assertionMethod"] = assertion;
+
+    let mut did_file = NamedTempFile::new().expect("did temp file");
+    write!(
+        did_file,
+        "{}",
+        serde_json::to_string_pretty(&did).expect("did serializes")
+    )
+    .expect("did temp write");
+
+    let mut args = fixture_args(fixture);
+    replace_arg(
+        &mut args,
+        "--did-document",
+        did_file.path().display().to_string(),
+    );
+    let output = run_with_owned_args(&args);
+    assert!(
+        output.status.success(),
+        "verifier must accept a singleton assertionMethod reference\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
 fn node_verifier_rejects_authentication_only_key() {
     let fixture = &FIXTURES[0];
     let fixture_path = fixture_path(fixture);

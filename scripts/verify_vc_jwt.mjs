@@ -247,11 +247,12 @@ function verificationMethodCandidates(didDocument) {
 
 function findAssertionMethod(didDocument, kid) {
   const assertionMethods = didDocument.assertionMethod;
-  if (!Array.isArray(assertionMethods)) {
-    throw new VerificationError("DID Document assertionMethod must be an array");
+  if (!assertionMethods) {
+    throw new VerificationError("DID Document assertionMethod is missing");
   }
+  const methods = Array.isArray(assertionMethods) ? assertionMethods : [assertionMethods];
 
-  for (const entry of assertionMethods) {
+  for (const entry of methods) {
     if (entry === kid) {
       return verificationMethodCandidates(didDocument).find((method) => method.id === kid);
     }
