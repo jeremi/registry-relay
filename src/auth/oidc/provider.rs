@@ -67,6 +67,7 @@ const BEARER_SCHEME: &str = "Bearer";
 /// instance serves every concurrent request.
 pub struct OidcAuth {
     algorithms: Vec<Algorithm>,
+    audiences: HashSet<String>,
     scope_claim: String,
     scope_map: BTreeMap<String, String>,
     /// Accepted JOSE `typ` values, normalised to lowercase for the
@@ -103,6 +104,7 @@ impl OidcAuth {
             .iter()
             .map(|t| t.to_ascii_lowercase())
             .collect();
+        let audiences = config.audience.iter().cloned().collect();
         let verifier = TokenVerifier::new(
             TokenVerifierConfig::registry_relay_access_profile(
                 config.issuer.clone(),
@@ -118,6 +120,7 @@ impl OidcAuth {
         );
         Self {
             algorithms,
+            audiences,
             scope_claim: config.scope_claim.clone(),
             scope_map: config.scope_map.clone(),
             token_types,
@@ -197,7 +200,7 @@ impl OidcAuth {
             scopes: _,
         } = verified;
 
-        let scopes: ScopeSet = extract_scopes(&claims, &self.scope_claim)
+        let scopes: ScopeSet = extract_scopes(&claims, &self.scope_claim, &self.audiences)
             .into_iter()
             .map(|s| self.scope_map.get(&s).cloned().unwrap_or(s))
             .collect();
@@ -348,8 +351,14 @@ fn unverified_payload(token: &str) -> Option<Value> {
 /// Reserved claims are accepted only when explicitly named as `scope_claim`.
 /// They are verified by the OIDC library before Relay sees them, and are useful
 /// for demo or provider setups where policy maps a principal/client/audience to
-/// local Relay scopes. Role/entitlement claims remain the production default.
-fn extract_scopes(claims: &Claims, claim_name: &str) -> Vec<String> {
+/// local Relay scopes. When `aud` is configured as the source, only accepted
+/// Relay audiences are eligible for scope mapping. Role/entitlement claims
+/// remain the production default.
+fn extract_scopes(
+    claims: &Claims,
+    claim_name: &str,
+    accepted_audiences: &HashSet<String>,
+) -> Vec<String> {
     if let Some(value) = claims.extra.get(claim_name) {
         return extract_scope_values(value);
     }
@@ -358,9 +367,16 @@ fn extract_scopes(claims: &Claims, claim_name: &str) -> Vec<String> {
         "client_id" => claims.client_id.iter().cloned().collect(),
         "azp" => claims.azp.iter().cloned().collect(),
         "aud" => match claims.aud.as_ref() {
-            Some(Audience::One(value)) => vec![value.clone()],
-            Some(Audience::Many(values)) => values.clone(),
+            Some(Audience::One(value)) if accepted_audiences.contains(value) => {
+                vec![value.clone()]
+            }
+            Some(Audience::Many(values)) => values
+                .iter()
+                .filter(|value| accepted_audiences.contains(*value))
+                .cloned()
+                .collect(),
             None => Vec::new(),
+            _ => Vec::new(),
         },
         _ => Vec::new(),
     }
@@ -695,6 +711,7 @@ mod tests {
             },
         );
         let mut config = base_config();
+        config.audience.push("registry-lab-api".to_string());
         config.scope_claim = "aud".to_string();
         config.scope_map.insert(
             "registry-lab-api".to_string(),
@@ -703,6 +720,24 @@ mod tests {
         let provider = provider_from(config, jwks_for(TEST_KID, &vk));
         let principal = provider.verify(&token).await.expect("ok");
         assert!(principal.scopes.contains("social_protection_registry:rows"));
+    }
+
+    #[tokio::test]
+    async fn reserved_audience_scope_claim_ignores_unaccepted_audiences() {
+        let (sk, vk) = fresh_keypair();
+        let token = mint(
+            &sk,
+            TokenOpts {
+                aud: Some(json!([TEST_AUDIENCE, "social_protection_registry:rows"])),
+                ..Default::default()
+            },
+        );
+        let mut config = base_config();
+        config.scope_claim = "aud".to_string();
+        let provider = provider_from(config, jwks_for(TEST_KID, &vk));
+        let principal = provider.verify(&token).await.expect("ok");
+        assert!(!principal.scopes.contains("social_protection_registry:rows"));
+        assert!(principal.scopes.contains(TEST_AUDIENCE));
     }
 
     #[tokio::test]
