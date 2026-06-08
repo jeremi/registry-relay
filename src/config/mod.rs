@@ -446,6 +446,12 @@ pub struct OidcConfig {
     /// relay's `<dataset_id>:<level>` shape.
     #[serde(default)]
     pub scope_map: BTreeMap<String, String>,
+    /// Optional keys that must be present inside object-valued role
+    /// claim values before the role key is treated as an active scope.
+    /// This is useful for IdPs such as Zitadel where role values are
+    /// keyed by organization id.
+    #[serde(default)]
+    pub scope_object_required_keys: Vec<String>,
     /// Optional allowlist of client identifiers, matched against the
     /// token's `azp` (preferred) or `client_id` claim. Empty list
     /// means any client is accepted.

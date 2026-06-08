@@ -1471,6 +1471,19 @@ fn validate_oidc(oidc: &OidcConfig) -> Result<(), ConfigError> {
     }
 
     if oidc
+        .scope_object_required_keys
+        .iter()
+        .any(|key| key.trim().is_empty())
+    {
+        tracing::error!(
+            code = "config.validation_error",
+            field = "auth.oidc.scope_object_required_keys",
+            "scope_object_required_keys entries must be non-empty"
+        );
+        return Err(ConfigError::ValidationError);
+    }
+
+    if oidc
         .allowed_clients
         .iter()
         .any(|client| client.trim().is_empty())

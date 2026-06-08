@@ -70,6 +70,7 @@ pub struct OidcAuth {
     audiences: HashSet<String>,
     scope_claim: String,
     scope_map: BTreeMap<String, String>,
+    scope_object_required_keys: HashSet<String>,
     /// Accepted JOSE `typ` values, normalised to lowercase for the
     /// case-insensitive match RFC 7515 prescribes.
     token_types: HashSet<String>,
@@ -123,6 +124,7 @@ impl OidcAuth {
             audiences,
             scope_claim: config.scope_claim.clone(),
             scope_map: config.scope_map.clone(),
+            scope_object_required_keys: config.scope_object_required_keys.iter().cloned().collect(),
             token_types,
             cache,
             verifier,
@@ -200,10 +202,15 @@ impl OidcAuth {
             scopes: _,
         } = verified;
 
-        let scopes: ScopeSet = extract_scopes(&claims, &self.scope_claim, &self.audiences)
-            .into_iter()
-            .map(|s| self.scope_map.get(&s).cloned().unwrap_or(s))
-            .collect();
+        let scopes: ScopeSet = extract_scopes(
+            &claims,
+            &self.scope_claim,
+            &self.audiences,
+            &self.scope_object_required_keys,
+        )
+        .into_iter()
+        .map(|s| self.scope_map.get(&s).cloned().unwrap_or(s))
+        .collect();
 
         let principal_id = claims
             .sub
@@ -344,9 +351,9 @@ fn unverified_payload(token: &str) -> Option<Value> {
 ///   IdPs that emit roles as a flat list.
 /// * `Object`: Zitadel emits roles under
 ///   `urn:zitadel:iam:org:project:roles` as an object whose **keys** are
-///   the role names (the values carry per-org metadata that the relay
-///   does not consume). The keys are returned as scopes; `scope_map`
-///   then renames them into the relay's `<dataset_id>:<level>` shape.
+///   the role names. Role keys are returned only when their values carry
+///   active-grant semantics; `scope_map` then renames them into the relay's
+///   `<dataset_id>:<level>` shape.
 ///
 /// Reserved claims are accepted only when explicitly named as `scope_claim`.
 /// They are verified by the OIDC library before Relay sees them, and are useful
@@ -358,9 +365,10 @@ fn extract_scopes(
     claims: &Claims,
     claim_name: &str,
     accepted_audiences: &HashSet<String>,
+    scope_object_required_keys: &HashSet<String>,
 ) -> Vec<String> {
     if let Some(value) = claims.extra.get(claim_name) {
-        return extract_scope_values(value);
+        return extract_scope_values(value, scope_object_required_keys);
     }
     match claim_name {
         "sub" => claims.sub.iter().cloned().collect(),
@@ -382,15 +390,49 @@ fn extract_scopes(
     }
 }
 
-fn extract_scope_values(value: &Value) -> Vec<String> {
+fn extract_scope_values(
+    value: &Value,
+    scope_object_required_keys: &HashSet<String>,
+) -> Vec<String> {
     match value {
         Value::String(s) => s.split_whitespace().map(String::from).collect(),
         Value::Array(items) => items
             .iter()
             .filter_map(|item| item.as_str().map(String::from))
             .collect(),
-        Value::Object(map) => map.keys().cloned().collect(),
+        Value::Object(map) => map
+            .iter()
+            .filter(|(_, value)| scope_object_value_is_active(value, scope_object_required_keys))
+            .map(|(key, _)| key.clone())
+            .collect(),
         _ => Vec::new(),
+    }
+}
+
+fn scope_object_value_is_active(value: &Value, required_keys: &HashSet<String>) -> bool {
+    if !required_keys.is_empty() {
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        return required_keys.iter().any(|key| {
+            object
+                .get(key)
+                .is_some_and(scope_object_value_has_active_content)
+        });
+    }
+
+    scope_object_value_has_active_content(value)
+}
+
+fn scope_object_value_has_active_content(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(values) => values.iter().any(scope_object_value_has_active_content),
+        Value::Object(object) => {
+            !object.is_empty() && object.values().any(scope_object_value_has_active_content)
+        }
+        Value::Null | Value::Number(_) => false,
     }
 }
 
@@ -454,6 +496,7 @@ mod tests {
             leeway: Duration::from_secs(60),
             scope_claim: "scope".to_string(),
             scope_map: BTreeMap::new(),
+            scope_object_required_keys: Vec::new(),
             allowed_clients: Vec::new(),
             token_types: vec!["JWT".to_string(), "at+jwt".to_string()],
         }
@@ -586,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn scope_object_form_treats_keys_as_scopes() {
         // Zitadel's `urn:zitadel:iam:org:project:roles` shape: an object
-        // keyed by role name with per-org metadata as the value.
+        // keyed by role name with active per-org metadata as the value.
         let (sk, vk) = fresh_keypair();
         let token = mint(
             &sk,
@@ -614,6 +657,79 @@ mod tests {
         let provider = provider_from(config, jwks_for(TEST_KID, &vk));
         let principal = provider.verify(&token).await.expect("ok");
         assert!(principal.scopes.contains("social_registry:rows"));
+        assert!(principal.scopes.contains("social_registry:aggregate"));
+    }
+
+    #[tokio::test]
+    async fn scope_object_form_requires_active_values() {
+        let (sk, vk) = fresh_keypair();
+        let token = mint(
+            &sk,
+            TokenOpts {
+                extra: Map::from_iter([(
+                    "urn:zitadel:iam:org:project:roles".to_string(),
+                    json!({
+                        "social-registry-reader": false,
+                        "social-registry-aggregate": null,
+                        "social-registry-metadata": {},
+                    }),
+                )]),
+                ..Default::default()
+            },
+        );
+        let mut config = base_config();
+        config.scope_claim = "urn:zitadel:iam:org:project:roles".to_string();
+        config.scope_map.insert(
+            "social-registry-reader".to_string(),
+            "social_registry:rows".to_string(),
+        );
+        config.scope_map.insert(
+            "social-registry-aggregate".to_string(),
+            "social_registry:aggregate".to_string(),
+        );
+        config.scope_map.insert(
+            "social-registry-metadata".to_string(),
+            "social_registry:metadata".to_string(),
+        );
+
+        let provider = provider_from(config, jwks_for(TEST_KID, &vk));
+        let principal = provider.verify(&token).await.expect("ok");
+        assert!(!principal.scopes.contains("social_registry:rows"));
+        assert!(!principal.scopes.contains("social_registry:aggregate"));
+        assert!(!principal.scopes.contains("social_registry:metadata"));
+    }
+
+    #[tokio::test]
+    async fn scope_object_form_requires_configured_org_key_when_set() {
+        let (sk, vk) = fresh_keypair();
+        let token = mint(
+            &sk,
+            TokenOpts {
+                extra: Map::from_iter([(
+                    "urn:zitadel:iam:org:project:roles".to_string(),
+                    json!({
+                        "social-registry-reader": { "orgId-999": "zitadel.localhost" },
+                        "social-registry-aggregate": { "orgId-123": "zitadel.localhost" },
+                    }),
+                )]),
+                ..Default::default()
+            },
+        );
+        let mut config = base_config();
+        config.scope_claim = "urn:zitadel:iam:org:project:roles".to_string();
+        config.scope_object_required_keys = vec!["orgId-123".to_string()];
+        config.scope_map.insert(
+            "social-registry-reader".to_string(),
+            "social_registry:rows".to_string(),
+        );
+        config.scope_map.insert(
+            "social-registry-aggregate".to_string(),
+            "social_registry:aggregate".to_string(),
+        );
+
+        let provider = provider_from(config, jwks_for(TEST_KID, &vk));
+        let principal = provider.verify(&token).await.expect("ok");
+        assert!(!principal.scopes.contains("social_registry:rows"));
         assert!(principal.scopes.contains("social_registry:aggregate"));
     }
 

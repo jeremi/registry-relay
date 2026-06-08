@@ -1280,6 +1280,7 @@ fn oidc_config_loads_with_defaults() {
     assert_eq!(oidc.leeway.as_secs(), 60);
     assert_eq!(oidc.scope_claim, "scope");
     assert!(oidc.scope_map.is_empty());
+    assert!(oidc.scope_object_required_keys.is_empty());
     assert!(oidc.allowed_clients.is_empty());
     assert_eq!(
         oidc.token_types,
@@ -1298,6 +1299,8 @@ fn oidc_config_accepts_overrides() {
     scope_claim: scp
     scope_map:
       role/registry-reader: clinic_capacity:rows
+    scope_object_required_keys:
+      - orgId-123
     allowed_clients:
       - openspp-client
     token_types:
@@ -1319,6 +1322,10 @@ fn oidc_config_accepts_overrides() {
             .get("role/registry-reader")
             .map(String::as_str),
         Some("clinic_capacity:rows")
+    );
+    assert_eq!(
+        oidc.scope_object_required_keys,
+        vec!["orgId-123".to_string()]
     );
     assert_eq!(oidc.allowed_clients, vec!["openspp-client".to_string()]);
     assert_eq!(oidc.token_types, vec!["at+jwt".to_string()]);
@@ -1388,6 +1395,7 @@ fn example_oidc_config_loads_and_validates() {
             .map(String::as_str),
         Some("social_registry:aggregate"),
     );
+    assert!(oidc.scope_object_required_keys.is_empty());
     assert!(oidc.allowed_clients.is_empty());
     assert_eq!(
         oidc.token_types,
@@ -1652,6 +1660,14 @@ fn oidc_config_rejects_jwks_cache_ttl_out_of_range() {
 fn oidc_config_rejects_scope_claim_with_whitespace() {
     let tmp = TempDir::new().expect("tempdir");
     let extra = "    scope_claim: \"my scope\"\n";
+    let path = write_config(&tmp, &oidc_config_body(extra));
+    assert_config_code(config::load(&path), "config.validation_error");
+}
+
+#[test]
+fn oidc_config_rejects_empty_scope_object_required_key() {
+    let tmp = TempDir::new().expect("tempdir");
+    let extra = "    scope_object_required_keys:\n      - \"\"\n";
     let path = write_config(&tmp, &oidc_config_body(extra));
     assert_config_code(config::load(&path), "config.validation_error");
 }
