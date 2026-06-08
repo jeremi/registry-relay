@@ -64,7 +64,7 @@ by the deployment operator.
 Scopes are dataset-local and independent, written as `<dataset_id>:<level>` (for
 example `social_registry:rows`):
 
-| Scope Class | Use |
+| Scope Level | Use |
 | --- | --- |
 | `metadata` | Discover visible datasets, entities, schemas, policies, and scoped OpenAPI |
 | `rows` | Read entity records and relationships |
