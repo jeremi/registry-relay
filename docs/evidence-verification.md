@@ -1,4 +1,4 @@
-# Evidence offering discovery
+# Evidence Offering Discovery
 
 Registry Relay publishes evidence offering metadata for discovery and delegates claim and evidence verification to Registry Notary. Relay exposes registry data from configured file and PostgreSQL sources.
 
