@@ -2151,7 +2151,6 @@ fn postgres_sql_tokens(sql: &str) -> Vec<String> {
     let mut current = String::new();
     let mut chars = sql.chars().peekable();
     let mut in_single_quote = false;
-    let mut in_double_quote = false;
     let mut in_line_comment = false;
     let mut in_block_comment = false;
 
@@ -2179,17 +2178,6 @@ fn postgres_sql_tokens(sql: &str) -> Vec<String> {
             }
             continue;
         }
-        if in_double_quote {
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    chars.next();
-                } else {
-                    in_double_quote = false;
-                }
-            }
-            continue;
-        }
-
         match ch {
             '-' if chars.peek() == Some(&'-') => {
                 chars.next();
@@ -2207,7 +2195,10 @@ fn postgres_sql_tokens(sql: &str) -> Vec<String> {
             }
             '"' => {
                 push_postgres_sql_token(&mut tokens, &mut current);
-                in_double_quote = true;
+                let token = read_postgres_quoted_identifier(&mut chars);
+                if !token.is_empty() {
+                    tokens.push(token.to_ascii_lowercase());
+                }
             }
             ch if ch.is_ascii_alphanumeric() || ch == '_' => {
                 current.push(ch.to_ascii_lowercase());
@@ -2217,6 +2208,26 @@ fn postgres_sql_tokens(sql: &str) -> Vec<String> {
     }
     push_postgres_sql_token(&mut tokens, &mut current);
     tokens
+}
+
+fn read_postgres_quoted_identifier<I>(chars: &mut std::iter::Peekable<I>) -> String
+where
+    I: Iterator<Item = char>,
+{
+    let mut identifier = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            if chars.peek() == Some(&'"') {
+                chars.next();
+                identifier.push('"');
+            } else {
+                break;
+            }
+        } else {
+            identifier.push(ch);
+        }
+    }
+    identifier
 }
 
 fn push_postgres_sql_token(tokens: &mut Vec<String>, current: &mut String) {
