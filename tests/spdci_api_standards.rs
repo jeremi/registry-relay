@@ -755,6 +755,98 @@ async fn sync_search_rejects_unsupported_predicate_operator() {
 }
 
 #[tokio::test]
+async fn sync_search_rejects_empty_criteria_before_collection_read() {
+    let server = server().await;
+    let cases = [
+        (
+            "empty-search-request",
+            json!({
+                "header": valid_header("msg-empty-search-request"),
+                "message": {
+                    "transaction_id": "txn-empty-search-request",
+                    "search_request": []
+                }
+            }),
+        ),
+        (
+            "empty-expression-query",
+            json!({
+                "header": valid_header("msg-empty-expression-query"),
+                "message": {
+                    "transaction_id": "txn-empty-expression-query",
+                    "search_request": [{
+                        "reference_id": "ref-empty-expression-query",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "search_criteria": {
+                            "query_type": "expression",
+                            "query": {
+                                "type": "ns:org:QueryType:expression",
+                                "value": {
+                                    "expression": {
+                                        "query": {}
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                }
+            }),
+        ),
+        (
+            "empty-and-expression",
+            json!({
+                "header": valid_header("msg-empty-and-expression"),
+                "message": {
+                    "transaction_id": "txn-empty-and-expression",
+                    "search_request": [{
+                        "reference_id": "ref-empty-and-expression",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "search_criteria": {
+                            "query_type": "expression",
+                            "query": {
+                                "type": "ns:org:QueryType:expression",
+                                "value": {
+                                    "expression": {
+                                        "query": {"$and": []}
+                                    }
+                                }
+                            }
+                        }
+                    }]
+                }
+            }),
+        ),
+        (
+            "predicate-without-expression",
+            json!({
+                "header": valid_header("msg-predicate-without-expression"),
+                "message": {
+                    "transaction_id": "txn-predicate-without-expression",
+                    "search_request": [{
+                        "reference_id": "ref-predicate-without-expression",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "search_criteria": {
+                            "query_type": "predicate",
+                            "query": [{"seq_num": 1}]
+                        }
+                    }]
+                }
+            }),
+        ),
+    ];
+
+    for (name, body) in cases {
+        let response = server
+            .post("/dci/dr/registry/sync/search")
+            .json(&body)
+            .await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        let body: Value = response.json();
+        assert_eq!(body["code"], "filter.invalid_value", "{name}");
+    }
+}
+
+#[tokio::test]
 async fn sync_search_projects_response_fields_into_nested_reg_record_when_available() {
     let server = match try_server_with_registry_extra(
         r#"        response_fields:

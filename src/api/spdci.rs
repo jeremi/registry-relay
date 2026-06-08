@@ -465,6 +465,9 @@ impl SearchRequest {
         let Some(items) = message.get("search_request").and_then(Value::as_array) else {
             return Err(FilterError::InvalidValue.into());
         };
+        if items.is_empty() {
+            return Err(FilterError::InvalidValue.into());
+        }
         let mut parsed = Vec::with_capacity(items.len());
         for item in items {
             let criteria = item
@@ -474,6 +477,9 @@ impl SearchRequest {
                 string_field(criteria, "query_type").ok_or(FilterError::InvalidValue)?;
             let query = criteria.get("query").ok_or(FilterError::InvalidValue)?;
             let filters = filters_from_search_query(&query_type, query, config)?;
+            if filters.is_empty() {
+                return Err(FilterError::InvalidValue.into());
+            }
             let limit = criteria
                 .pointer("/pagination/page_size")
                 .and_then(Value::as_u64)
@@ -641,6 +647,9 @@ fn parse_expression_object(
     config: &SpdciRegistryConfig,
 ) -> Result<Vec<EntityFilter>, Error> {
     if let Some(and) = expression.get("$and").and_then(Value::as_array) {
+        if and.is_empty() {
+            return Err(FilterError::InvalidValue.into());
+        }
         let mut filters = Vec::new();
         for part in and {
             filters.extend(parse_expression_object(part, config)?);
@@ -650,6 +659,9 @@ fn parse_expression_object(
     let Some(object) = expression.as_object() else {
         return Err(FilterError::InvalidValue.into());
     };
+    if object.is_empty() {
+        return Err(FilterError::InvalidValue.into());
+    }
     let mut filters = Vec::new();
     for (attribute, value) in object {
         let field = config
@@ -668,6 +680,9 @@ fn filters_from_predicate_query(
     let Some(predicates) = query.as_array() else {
         return Err(FilterError::InvalidValue.into());
     };
+    if predicates.is_empty() {
+        return Err(FilterError::InvalidValue.into());
+    }
     let mut filters = Vec::new();
     for predicate in predicates {
         if let Some(condition) = string_field(predicate, "condition") {
@@ -675,10 +690,15 @@ fn filters_from_predicate_query(
                 return Err(FilterError::UnsupportedOp.into());
             }
         }
+        let mut has_expression = false;
         for key in ["expression1", "expression2"] {
             if let Some(expression) = predicate.get(key) {
+                has_expression = true;
                 filters.push(filter_from_predicate_expression(expression, config)?);
             }
+        }
+        if !has_expression {
+            return Err(FilterError::InvalidValue.into());
         }
     }
     Ok(filters)
