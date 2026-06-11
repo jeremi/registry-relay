@@ -48,10 +48,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Checkout registry-platform
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.REGISTRY_PLATFORM_REPOSITORY }}
           ref: ${{ env.REGISTRY_PLATFORM_REF }}
@@ -62,7 +62,7 @@ jobs:
         run: ln -s "$GITHUB_WORKSPACE/registry-platform" "$GITHUB_WORKSPACE/../registry-platform"
 
       - name: Checkout crosswalk
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.CROSSWALK_REPOSITORY }}
           ref: ${{ env.CROSSWALK_REF }}
@@ -72,7 +72,7 @@ jobs:
         run: ln -s "$GITHUB_WORKSPACE/crosswalk" "$GITHUB_WORKSPACE/../crosswalk"
 
       - name: Checkout registry-manifest
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.REGISTRY_MANIFEST_REPOSITORY }}
           ref: ${{ env.REGISTRY_MANIFEST_REF }}
@@ -91,7 +91,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Check Docker build contract
         run: python3 scripts/check_docker_build_contract.py
@@ -100,7 +100,7 @@ jobs:
         run: python3 scripts/check_workflow_hardening.py
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: nextest@0.9.136
           fallback: none
@@ -145,10 +145,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Checkout registry-platform
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.REGISTRY_PLATFORM_REPOSITORY }}
           ref: ${{ env.REGISTRY_PLATFORM_REF }}
@@ -159,7 +159,7 @@ jobs:
         run: ln -s "$GITHUB_WORKSPACE/registry-platform" "$GITHUB_WORKSPACE/../registry-platform"
 
       - name: Checkout crosswalk
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.CROSSWALK_REPOSITORY }}
           ref: ${{ env.CROSSWALK_REF }}
@@ -169,7 +169,7 @@ jobs:
         run: ln -s "$GITHUB_WORKSPACE/crosswalk" "$GITHUB_WORKSPACE/../crosswalk"
 
       - name: Checkout registry-manifest
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.REGISTRY_MANIFEST_REPOSITORY }}
           ref: ${{ env.REGISTRY_MANIFEST_REF }}
@@ -180,7 +180,7 @@ jobs:
         run: ln -s "$GITHUB_WORKSPACE/registry-manifest" "$GITHUB_WORKSPACE/../registry-manifest"
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: cargo-deny@0.19.8
 
@@ -205,10 +205,10 @@ jobs:
           --health-retries 12
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Checkout registry-platform
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.REGISTRY_PLATFORM_REPOSITORY }}
           ref: ${{ env.REGISTRY_PLATFORM_REF }}
@@ -219,7 +219,7 @@ jobs:
         run: ln -s "$GITHUB_WORKSPACE/registry-platform" "$GITHUB_WORKSPACE/../registry-platform"
 
       - name: Checkout crosswalk
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.CROSSWALK_REPOSITORY }}
           ref: ${{ env.CROSSWALK_REF }}
@@ -229,7 +229,7 @@ jobs:
         run: ln -s "$GITHUB_WORKSPACE/crosswalk" "$GITHUB_WORKSPACE/../crosswalk"
 
       - name: Checkout registry-manifest
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.REGISTRY_MANIFEST_REPOSITORY }}
           ref: ${{ env.REGISTRY_MANIFEST_REF }}
@@ -250,7 +250,7 @@ jobs:
           key: postgres-integration
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
         with:
           tool: nextest@0.9.136
           fallback: none
@@ -316,10 +316,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Checkout registry-platform
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.REGISTRY_PLATFORM_REPOSITORY }}
           ref: ${{ env.REGISTRY_PLATFORM_REF }}
@@ -327,14 +327,14 @@ jobs:
           path: registry-platform
 
       - name: Checkout crosswalk
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.CROSSWALK_REPOSITORY }}
           ref: ${{ env.CROSSWALK_REF }}
           path: crosswalk
 
       - name: Checkout registry-manifest
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.REGISTRY_MANIFEST_REPOSITORY }}
           ref: ${{ env.REGISTRY_MANIFEST_REF }}
