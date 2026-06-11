@@ -38,6 +38,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import sys
 from pathlib import Path
 
@@ -175,7 +176,7 @@ def build_env_lines(
         "#",
         "# Provenance signing key: JSON-encoded Ed25519 private JWK.",
         "# Read by the software signer at startup. NEVER commit this file.",
-        f"REGISTRY_RELAY_PROVENANCE_JWK={provenance_jwk}",
+        f"REGISTRY_RELAY_PROVENANCE_JWK={shlex.quote(provenance_jwk)}",
     ]
     return lines
 
