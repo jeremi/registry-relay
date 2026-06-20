@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Governed identity attribute-release routes.
 //!
-//! A release profile is a purpose-bound, projection-limited,
-//! exactly-one-subject lookup that returns only the attributes approved for a
-//! named profile, mapped into OIDC/UserInfo-style claims. The resolve handler
+//! A release profile is a projection-limited, exactly-one-subject lookup that
+//! returns only the attributes approved for a named profile, mapped into
+//! OIDC/UserInfo-style claims. A profile is *optionally* purpose-bound: when it
+//! declares a `purpose`, the request's `data-purpose` header must equal it
+//! before any release; a profile that omits `purpose` carries no such gate. The
+//! resolve handler
 //! never returns a raw registry row: the response body is built field-by-field
 //! from profile metadata and the projected claim set, so no source field absent
 //! from the profile, no raw subject value (outside a released claim), and no

@@ -1022,14 +1022,17 @@ pub struct EntityConfig {
 }
 
 /// A governed identity attribute-release profile. A profile is a
-/// purpose-bound, projection-limited, exactly-one-subject lookup that maps a
-/// configured set of source fields (or CEL-computed expressions) into a
-/// minimised OIDC/UserInfo-style claim bundle. Identified globally by the
-/// `(id, version)` pair; both are required path segments at resolve time.
+/// projection-limited, exactly-one-subject lookup that maps a configured set of
+/// source fields (or CEL-computed expressions) into a minimised
+/// OIDC/UserInfo-style claim bundle. It is *optionally* purpose-bound: a profile
+/// that declares a `purpose` requires a matching `data-purpose` at resolve time;
+/// one that omits it does not. Identified globally by the `(id, version)` pair;
+/// both are required path segments at resolve time.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AttributeReleaseProfile {
-    /// Profile identifier, lower-snake. Globally unique with `version`.
+    /// Profile identifier, lower-kebab/snake (`^[a-z][a-z0-9_-]*$`). Globally
+    /// unique with `version`.
     pub id: String,
     /// Profile version. Globally unique with `id`; no silent "latest".
     pub version: String,

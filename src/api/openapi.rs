@@ -1407,7 +1407,8 @@ fn tag_definitions(catalog: &CatalogDocument, config: &Config) -> Value {
     if attribute_releases_configured(config) {
         tags.push(json!({
             "name": TAG_ATTRIBUTE_RELEASE,
-            "description": "Purpose-bound, projection-limited identity attribute release. \
+            "description": "Projection-limited, exactly-one-subject identity attribute \
+                            release; a profile is purpose-bound when it declares a purpose. \
                             Returns only the approved claim bundle for a named release \
                             profile; never a raw registry row.",
         }));

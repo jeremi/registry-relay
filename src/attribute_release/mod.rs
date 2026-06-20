@@ -57,6 +57,9 @@ pub use enabled::{
 mod enabled {
     use super::AttributeReleaseError;
 
+    use std::collections::HashMap;
+    use std::sync::{Arc, OnceLock, RwLock};
+
     use serde_json::{json, Value};
 
     use crosswalk_core::{
@@ -111,15 +114,19 @@ mod enabled {
         Ok(value)
     }
 
-    /// Synthesize the one-field document, compile it, evaluate it against
-    /// `record`, and read the single output field back. Shared by both the
-    /// predicate and scalar entry points so the fail-closed handling is
+    /// Synthesize the one-field document, compile it (once, cached), evaluate it
+    /// against `record`, and read the single output field back. Shared by both
+    /// the predicate and scalar entry points so the fail-closed handling is
     /// identical.
+    ///
+    /// CEL is compiled lazily on first use and cached process-wide by expression
+    /// text (see [`compiled_mapping`]); subsequent resolves reuse the compiled
+    /// mapping instead of recompiling on the identity hot path. This matches the
+    /// caching the SP DCI / PublicSchema mappers already do.
     fn evaluate_single_field(cel: &str, record: &Value) -> Result<Value, AttributeReleaseError> {
-        let runtime = MappingRuntime::new(RuntimeOptions::default());
-        let mapping = compile(&runtime, cel)?;
+        let mapping = compiled_mapping(cel)?;
 
-        let out = runtime.evaluate(
+        let out = shared_runtime().evaluate(
             &mapping,
             EvaluationInput {
                 source: record.clone(),
@@ -140,6 +147,46 @@ mod enabled {
         // yields a `false`-valued record field or zero records; if zero-record,
         // callers translate MissingField → deny (still fail-closed).
         read_single_field(out.records)
+    }
+
+    /// Process-wide runtime used to both compile and evaluate cached mappings, so
+    /// each mapping is evaluated by the runtime that compiled it. `evaluate` takes
+    /// `&self`, and the SP DCI adapter already shares one `MappingRuntime` across
+    /// concurrent requests, so a single shared instance is safe here.
+    fn shared_runtime() -> &'static MappingRuntime {
+        static RUNTIME: OnceLock<MappingRuntime> = OnceLock::new();
+        RUNTIME.get_or_init(|| MappingRuntime::new(RuntimeOptions::default()))
+    }
+
+    /// The compiled-mapping cache, keyed by raw CEL expression text.
+    fn cel_cache() -> &'static RwLock<HashMap<String, Arc<CompiledMapping>>> {
+        static CACHE: OnceLock<RwLock<HashMap<String, Arc<CompiledMapping>>>> = OnceLock::new();
+        CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+    }
+
+    /// Compile `cel` once and cache the resulting `Arc<CompiledMapping>` by
+    /// expression text, returning a clone on later calls. CEL only ever comes from
+    /// validated config (a finite set), so the cache is bounded by configuration
+    /// size, never by request data. Compilation is the expensive step; caching it
+    /// removes the per-resolve recompile from the identity auth path. This mirrors
+    /// the `Arc<CompiledMapping>` caching the SP DCI adapter already uses.
+    fn compiled_mapping(cel: &str) -> Result<Arc<CompiledMapping>, AttributeReleaseError> {
+        let cache = cel_cache();
+        // Fast path: an explicit scope drops the read guard before the (rare)
+        // write lock below, so we never hold a read lock across a write.
+        {
+            let guard = cache.read().unwrap_or_else(|poison| poison.into_inner());
+            if let Some(mapping) = guard.get(cel) {
+                return Ok(Arc::clone(mapping));
+            }
+        }
+        // Slow path: compile and insert. A concurrent double-compile is collapsed
+        // to a single stored value by the entry API, keeping one mapping per
+        // distinct expression.
+        let mapping = Arc::new(compile(shared_runtime(), cel)?);
+        let mut guard = cache.write().unwrap_or_else(|poison| poison.into_inner());
+        let entry = guard.entry(cel.to_string()).or_insert(mapping);
+        Ok(Arc::clone(entry))
     }
 
     /// Compile the synthesized document, mapping any compile error to a
@@ -289,6 +336,20 @@ mod enabled {
             assert!(matches!(err, AttributeReleaseError::Compile(_)));
             // PII-free: the rendered message carries no expression text.
             assert!(!err.to_string().contains("given_name"));
+        }
+
+        #[test]
+        fn compiled_mapping_is_cached_and_reused() {
+            // The fix for the per-resolve recompile: identical expression text
+            // must resolve to one shared compiled mapping, distinct text must not.
+            let a = compiled_mapping("source.deceased == false").expect("compiles");
+            let b = compiled_mapping("source.deceased == false").expect("compiles");
+            assert!(
+                Arc::ptr_eq(&a, &b),
+                "identical expressions must share one cached compiled mapping"
+            );
+            let c = compiled_mapping("source.given_name").expect("compiles");
+            assert!(!Arc::ptr_eq(&a, &c), "distinct expressions must not alias");
         }
 
         #[test]
