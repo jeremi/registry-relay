@@ -113,27 +113,35 @@ async fn resolve(
     let route = match RouteState::resolve(&runtime, &profile_id, &version) {
         Ok(route) => route,
         // `profile_not_found` renders as a generic 404 that does not confirm
-        // enumeration; it carries no audit context because no gate ran.
-        Err(error) => return error.into_response(),
+        // enumeration; it carries no audit context because no gate ran. It is
+        // still marked non-cacheable so a 404 is never stored.
+        Err(error) => return with_release_cache_headers(error.into_response(), None),
     };
+    // Only a successful release honours the profile's caching opt-in; every
+    // denial is forced to `no-store` below by passing `None`.
+    let success_max_age = route.profile.response.max_age_seconds;
     let result = run_resolve(&runtime, &route, &headers, principal, body).await;
     match result {
-        Ok(success) => with_audit_context(
-            success.response,
-            &route,
-            ResolveAudit {
-                requested_claims: Some(success.requested_claims),
-                released_claims: Some(success.released_claims),
-                subject_id_raw: success.subject_id_raw,
-                internal_outcome: None,
-                cardinality_outcome: Some("one".to_string()),
-                availability_class: Some("available".to_string()),
-                pdp_audit: success.pdp_audit,
-            },
-        ),
+        Ok(success) => {
+            let response = with_audit_context(
+                success.response,
+                &route,
+                ResolveAudit {
+                    requested_claims: Some(success.requested_claims),
+                    released_claims: Some(success.released_claims),
+                    subject_id_raw: success.subject_id_raw,
+                    internal_outcome: None,
+                    cardinality_outcome: Some("one".to_string()),
+                    availability_class: Some("available".to_string()),
+                    pdp_audit: success.pdp_audit,
+                },
+            );
+            with_release_cache_headers(response, success_max_age)
+        }
         Err(error) => {
             let response = error.error.into_response();
-            with_audit_context(response, &route, error.audit)
+            let response = with_audit_context(response, &route, error.audit);
+            with_release_cache_headers(response, None)
         }
     }
 }
@@ -702,6 +710,30 @@ fn with_private_metadata_headers(mut response: Response) -> Response {
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("private, no-store"),
     );
+    response.headers_mut().insert(
+        axum::http::header::VARY,
+        axum::http::HeaderValue::from_static("Authorization"),
+    );
+    response
+}
+
+/// Attach caching directives to a resolve response. Released identity attributes
+/// are PII, so the default is `private, no-store`: the bundle is never written to
+/// a shared or local cache. A profile may opt into bounded *private* caching of a
+/// successful release by setting `response.max_age_seconds`, which yields
+/// `private, max-age=N` (still never shared-cacheable, still `Vary: Authorization`
+/// so a token swap cannot reuse another principal's entry). Denials always pass
+/// `max_age = None` so an error is never cached regardless of the profile knob.
+fn with_release_cache_headers(mut response: Response, max_age_seconds: Option<u64>) -> Response {
+    let directive = match max_age_seconds {
+        Some(secs) => format!("private, max-age={secs}"),
+        None => "private, no-store".to_string(),
+    };
+    let value = axum::http::HeaderValue::from_str(&directive)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("private, no-store"));
+    response
+        .headers_mut()
+        .insert(axum::http::header::CACHE_CONTROL, value);
     response.headers_mut().insert(
         axum::http::header::VARY,
         axum::http::HeaderValue::from_static("Authorization"),

@@ -71,7 +71,15 @@ impl From<Error> for TestServerBuildError {
 /// drives the release-condition predicate; `given_name`/`surname` back direct
 /// and computed claims. The `optional_note` claim is optional and absent on the
 /// stored row so it is omitted from a successful release.
-fn release_config(entity_api_extra: &str, include_source_metadata: bool) -> String {
+fn release_config(
+    entity_api_extra: &str,
+    include_source_metadata: bool,
+    max_age_seconds: Option<u64>,
+) -> String {
+    let max_age_line = match max_age_seconds {
+        Some(secs) => format!("\n              max_age_seconds: {secs}"),
+        None => String::new(),
+    };
     format!(
         r#"
 server:
@@ -176,7 +184,7 @@ datasets:
                 source_field: surname
                 required: false
             response:
-              include_source_metadata: {include_source_metadata}
+              include_source_metadata: {include_source_metadata}{max_age_line}
 "#
     )
 }
@@ -205,22 +213,25 @@ async fn try_server_with_scopes_and_extra(
     scopes: &[&str],
     entity_api_extra: &str,
 ) -> Result<TestServer, TestServerBuildError> {
-    try_server_full(scopes, entity_api_extra, true).await
+    try_server_full(scopes, entity_api_extra, true, None).await
 }
 
 /// Like [`try_server_with_scopes_and_extra`] but with explicit control over the
-/// profile's `response.include_source_metadata` flag, so both branches of the
-/// source-block gate can be exercised.
+/// profile's `response.include_source_metadata` flag (so both branches of the
+/// source-block gate can be exercised) and its `response.max_age_seconds` cache
+/// opt-in (so the default `no-store` and the `private, max-age=N` paths can be
+/// asserted).
 async fn try_server_full(
     scopes: &[&str],
     entity_api_extra: &str,
     include_source_metadata: bool,
+    max_age_seconds: Option<u64>,
 ) -> Result<TestServer, TestServerBuildError> {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = tmp.path().join("release.yaml");
     std::fs::write(
         &config_path,
-        release_config(entity_api_extra, include_source_metadata),
+        release_config(entity_api_extra, include_source_metadata, max_age_seconds),
     )
     .expect("write config");
     env::set_var(
@@ -317,7 +328,7 @@ async fn resolve_omits_source_block_when_metadata_disabled() {
     // an eSignet authenticator profile), the claim bundle is still released but
     // the source block — which would disclose the backing dataset/entity names —
     // is suppressed entirely.
-    let server = try_server_full(&[RELEASE_SCOPE], "", false)
+    let server = try_server_full(&[RELEASE_SCOPE], "", false, None)
         .await
         .expect("test server builds");
     let response = server.post(RESOLVE_PATH).json(&subject_body("NID-1")).await;
@@ -702,5 +713,61 @@ async fn discovery_sets_private_metadata_headers() {
     assert_eq!(
         response.header("vary").to_str().expect("ascii"),
         "Authorization"
+    );
+}
+
+#[tokio::test]
+async fn resolve_success_defaults_to_no_store() {
+    // A released identity bundle is PII; with no `response.max_age_seconds`
+    // configured the response must forbid any caching.
+    let server = server().await;
+    let response = server.post(RESOLVE_PATH).json(&subject_body("NID-1")).await;
+    response.assert_status(StatusCode::OK);
+    assert_eq!(
+        response.header("cache-control").to_str().expect("ascii"),
+        "private, no-store"
+    );
+    assert_eq!(
+        response.header("vary").to_str().expect("ascii"),
+        "Authorization"
+    );
+}
+
+#[tokio::test]
+async fn resolve_success_honours_configured_max_age() {
+    // A profile may opt into bounded *private* caching of a successful release;
+    // `response.max_age_seconds: 300` yields `private, max-age=300` (never a
+    // shared cache, still keyed by Authorization via Vary).
+    let server = try_server_full(&[RELEASE_SCOPE], "", true, Some(300))
+        .await
+        .expect("test server builds");
+    let response = server.post(RESOLVE_PATH).json(&subject_body("NID-1")).await;
+    response.assert_status(StatusCode::OK);
+    assert_eq!(
+        response.header("cache-control").to_str().expect("ascii"),
+        "private, max-age=300"
+    );
+    assert_eq!(
+        response.header("vary").to_str().expect("ascii"),
+        "Authorization"
+    );
+}
+
+#[tokio::test]
+async fn resolve_denial_is_never_cached_even_with_max_age() {
+    // Denials must never be cached regardless of the profile's caching opt-in:
+    // a missing subject collapses to `release.subject_denied` (403) and the
+    // response must still be `private, no-store`, not `max-age=300`.
+    let server = try_server_full(&[RELEASE_SCOPE], "", true, Some(300))
+        .await
+        .expect("test server builds");
+    let response = server
+        .post(RESOLVE_PATH)
+        .json(&subject_body("NID-MISSING"))
+        .await;
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.header("cache-control").to_str().expect("ascii"),
+        "private, no-store"
     );
 }
