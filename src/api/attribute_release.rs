@@ -339,6 +339,15 @@ async fn run_resolve(
     // 9: project the claim bundle field-by-field. Required claim missing ⇒
     // ClaimUnavailable; optional missing ⇒ omit; a claim whose source field is
     // dropped by governed redaction is treated as unavailable.
+    //
+    // Governed redaction is field-layer: `claim_is_redacted` gates *direct*
+    // claims, but a computed (CEL) claim reads the row directly and would
+    // otherwise see a redacted field. Project claims over a row with the
+    // redacted fields removed so a CEL reference to one resolves to null/error
+    // and the claim fails closed — closing the redaction-bypass path for
+    // computed claims. The release predicate above runs over the full row on
+    // purpose: it is a disclosure gate whose boolean result reveals no value.
+    let projection_row = redact_row(&row, &governed.redaction_fields);
     let mut released = Map::new();
     for claim in &requested {
         if claim_is_redacted(claim, &governed.redaction_fields) {
@@ -354,7 +363,7 @@ async fn run_resolve(
             }
             continue;
         }
-        match claim_value(claim, &row) {
+        match claim_value(claim, &projection_row) {
             Some(value) => {
                 released.insert(claim.name.clone(), value);
             }
@@ -484,12 +493,33 @@ fn resolve_requested_claims<'a>(
 }
 
 /// Whether a direct-source claim resolves to a field dropped by governed
-/// redaction. Computed (CEL) claims are not redacted at the field layer.
+/// redaction. Computed (CEL) claims carry no `source_field`, so this returns
+/// false for them — they are instead redacted at the row layer by
+/// [`redact_row`] before evaluation, so a CEL reference to a redacted field
+/// fails closed rather than disclosing it.
 fn claim_is_redacted(claim: &ReleaseClaimConfig, redaction_fields: &BTreeSet<String>) -> bool {
     claim
         .source_field
         .as_deref()
         .is_some_and(|field| redaction_fields.contains(field))
+}
+
+/// Return a copy of the projected subject row with every governed-redacted field
+/// removed, so a computed (CEL) claim cannot read a field that field-layer
+/// redaction dropped. A removed field makes `source.<field>` resolve to
+/// null/error in CEL, so the dependent claim fails closed (required ⇒
+/// `ClaimUnavailable`, optional ⇒ omitted) instead of leaking the value. When
+/// no fields are redacted this is a cheap clone of the row.
+fn redact_row(row: &Value, redaction_fields: &BTreeSet<String>) -> Value {
+    match row {
+        Value::Object(map) if !redaction_fields.is_empty() => Value::Object(
+            map.iter()
+                .filter(|(key, _)| !redaction_fields.contains(key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        _ => row.clone(),
+    }
 }
 
 /// Compute a single claim value from the projected subject row. A direct claim

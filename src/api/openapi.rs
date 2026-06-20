@@ -4768,7 +4768,7 @@ fn attribute_release_resolve_response_schema() -> Value {
                         minimised claims for the matched subject. Never includes raw source \
                         rows, subject identifiers outside released claims, or private \
                         source internals.",
-        "required": ["profile_id", "profile_version", "claims", "source"],
+        "required": ["profile_id", "profile_version", "claims"],
         "properties": {
             "profile_id": {
                 "type": "string",
@@ -4791,9 +4791,11 @@ fn attribute_release_resolve_response_schema() -> Value {
             },
             "source": {
                 "type": "object",
-                "description": "Profile-sourced metadata about the release. Contains only \
-                                metadata derived from the profile configuration — never \
-                                private source table ids, paths, or secrets.",
+                "description": "Profile-sourced metadata about the release. Present only when \
+                                the profile sets `response.include_source_metadata: true`; a \
+                                minimising profile omits it entirely. Contains only metadata \
+                                derived from the profile configuration — never private source \
+                                table ids, paths, or secrets.",
                 "required": ["dataset", "entity", "subject_id_type", "cardinality",
                              "checked_at"],
                 "properties": {
@@ -5499,9 +5501,12 @@ mod tests {
             );
         }
 
-        // Required fields on AttributeReleaseResolveResponse schema
+        // Required fields on AttributeReleaseResolveResponse schema. `source` is
+        // intentionally NOT required: the runtime omits it for a minimising
+        // profile (`response.include_source_metadata: false`), so the contract
+        // must keep it optional.
         let response_required = &schemas["AttributeReleaseResolveResponse"]["required"];
-        for field in ["profile_id", "profile_version", "claims", "source"] {
+        for field in ["profile_id", "profile_version", "claims"] {
             assert!(
                 response_required
                     .as_array()
@@ -5511,6 +5516,15 @@ mod tests {
                 "AttributeReleaseResolveResponse must require field `{field}`"
             );
         }
+        assert!(
+            !response_required
+                .as_array()
+                .expect("required array")
+                .iter()
+                .any(|v| v == "source"),
+            "AttributeReleaseResolveResponse must NOT require `source` (omitted when \
+             include_source_metadata is false)"
+        );
 
         // TAG appears in the document-level tags array
         let tags = doc["tags"].as_array().expect("tags array");

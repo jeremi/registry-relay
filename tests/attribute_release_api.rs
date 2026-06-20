@@ -582,6 +582,45 @@ async fn resolve_optional_claim_omitted_when_source_redacted() {
     );
 }
 
+#[tokio::test]
+async fn resolve_computed_claim_cannot_read_redacted_field() {
+    // Governed redaction is field-layer, but the `full_name` claim is computed
+    // (`source.given_name + ' ' + source.surname`). Redact `surname`: a computed
+    // claim must NOT be able to read it back through CEL, so the redacted value
+    // "Lovelace" must never appear in the response and `full_name` must fail
+    // closed (omitted, since it is optional) rather than leak "Ada Lovelace".
+    let server = try_server_with_scopes_and_extra(
+        &[RELEASE_SCOPE],
+        r#"          governed_policy:
+            permitted_purposes:
+              - identity
+            redaction_fields: [surname]
+            trusted_context: {}
+"#,
+    )
+    .await
+    .expect("test server builds");
+
+    let response = server
+        .post(RESOLVE_PATH)
+        .add_header("data-purpose", "identity")
+        .json(&subject_body("NID-1"))
+        .await;
+    response.assert_status(StatusCode::OK);
+    let body: Value = response.json();
+    let serialized = body.to_string();
+    assert!(
+        !serialized.contains("Lovelace"),
+        "redacted surname must not leak via a computed claim: {serialized}"
+    );
+    let claims = &body["claims"];
+    assert_eq!(claims["given_name"], "Ada");
+    assert_ne!(
+        claims["full_name"], "Ada Lovelace",
+        "computed claim must not reconstruct the redacted surname"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Scope / purpose deny-before-read
 // ---------------------------------------------------------------------------
