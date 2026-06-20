@@ -533,7 +533,7 @@ jobs:
             registry-manifest=./registry-manifest
             crosswalk=./crosswalk
           build-args: |
-            REGISTRY_RELAY_FEATURES=spdci-api-standards,standards-cel-mapping,ogcapi-features,ogcapi-edr,ogcapi-records
+            REGISTRY_RELAY_FEATURES=spdci-api-standards,standards-cel-mapping,attribute-release,ogcapi-features,ogcapi-edr,ogcapi-records
           tags: registry-relay:ci
           load: false
           push: false

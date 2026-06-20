@@ -29,7 +29,7 @@ env:
   CROSSWALK_REPOSITORY: PublicSchema/crosswalk
   CROSSWALK_REF: 54e0f537830837fcd0c9efa87990987b1846931c
   REGISTRY_RELAY_IMAGE: ghcr.io/jeremi/registry-relay
-  REGISTRY_RELAY_RELEASE_FEATURES: spdci-api-standards,standards-cel-mapping,ogcapi-features,ogcapi-edr,ogcapi-records
+  REGISTRY_RELAY_RELEASE_FEATURES: spdci-api-standards,standards-cel-mapping,attribute-release,ogcapi-features,ogcapi-edr,ogcapi-records
 
 jobs:
   image:

@@ -21,9 +21,21 @@ ignore = [
     "RUSTSEC-2023-0071",
     # RUSTSEC-2023-0089: `atomic-polyfill` is pulled transitively by
     # `crosswalk-core` through phonenumber's build dependency stack (postcard
-    # → heapless 0.7) in consumers. Review when `crosswalk-core` or phonenumber
-    # removes this path, or before making CEL mapping part of a hardened
-    # default runtime.
+    # → heapless 0.7) in consumers.
+    #
+    # Review trigger discharged (2026-06): CEL mapping is now part of the
+    # hardened default runtime — the `attribute-release` adapter ships in the
+    # Cargo `default` feature set, so a bare build links crosswalk-core and
+    # therefore this transitive crate. The advisory is an *unmaintained-crate*
+    # notice (no assigned CVE / memory-safety defect): `atomic-polyfill` is a
+    # compile-time CAS shim selected only on bare-metal targets without native
+    # atomics. Registry Relay builds for std targets with native atomics, so the
+    # polyfill code path is not compiled into the served binary and there is no
+    # request-reachable, exploitable path in this usage. The advisory is retained
+    # (not removed) and flagged for explicit reviewer sign-off in the PR that
+    # makes CEL default. Re-review when `crosswalk-core` / phonenumber removes
+    # this path, or if `atomic-polyfill` is superseded by a memory-safety
+    # advisory.
     "RUSTSEC-2023-0089",
     # RUSTSEC-2024-0436: `paste` is pulled transitively by DataFusion in Relay.
     # It is unmaintained, but remains compile-time/runtime macro plumbing, not
