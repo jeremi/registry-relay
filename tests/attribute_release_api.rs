@@ -71,7 +71,7 @@ impl From<Error> for TestServerBuildError {
 /// drives the release-condition predicate; `given_name`/`surname` back direct
 /// and computed claims. The `optional_note` claim is optional and absent on the
 /// stored row so it is omitted from a successful release.
-fn release_config(entity_api_extra: &str) -> String {
+fn release_config(entity_api_extra: &str, include_source_metadata: bool) -> String {
     format!(
         r#"
 server:
@@ -176,7 +176,7 @@ datasets:
                 source_field: surname
                 required: false
             response:
-              include_source_metadata: false
+              include_source_metadata: {include_source_metadata}
 "#
     )
 }
@@ -205,9 +205,24 @@ async fn try_server_with_scopes_and_extra(
     scopes: &[&str],
     entity_api_extra: &str,
 ) -> Result<TestServer, TestServerBuildError> {
+    try_server_full(scopes, entity_api_extra, true).await
+}
+
+/// Like [`try_server_with_scopes_and_extra`] but with explicit control over the
+/// profile's `response.include_source_metadata` flag, so both branches of the
+/// source-block gate can be exercised.
+async fn try_server_full(
+    scopes: &[&str],
+    entity_api_extra: &str,
+    include_source_metadata: bool,
+) -> Result<TestServer, TestServerBuildError> {
     let tmp = TempDir::new().expect("tempdir");
     let config_path = tmp.path().join("release.yaml");
-    std::fs::write(&config_path, release_config(entity_api_extra)).expect("write config");
+    std::fs::write(
+        &config_path,
+        release_config(entity_api_extra, include_source_metadata),
+    )
+    .expect("write config");
     env::set_var(
         "REGISTRY_RELAY_TEST_AUDIT_HASH_SECRET",
         "relay-release-audit-secret-32-bytes",
@@ -288,10 +303,31 @@ async fn resolve_returns_only_configured_claims() {
     // optional_note maps to `surname` which is present, so it IS released here.
     assert_eq!(claims["optional_note"], "Lovelace");
 
+    // The default fixture enables include_source_metadata, so the source block
+    // is present; the false-path test below asserts it is omitted otherwise.
     assert_eq!(body["source"]["dataset"], "civil_registry");
     assert_eq!(body["source"]["entity"], "person");
     assert_eq!(body["source"]["subject_id_type"], "NATIONAL_ID");
     assert_eq!(body["source"]["cardinality"], "one");
+}
+
+#[tokio::test]
+async fn resolve_omits_source_block_when_metadata_disabled() {
+    // With response.include_source_metadata = false (the minimizing default for
+    // an eSignet authenticator profile), the claim bundle is still released but
+    // the source block — which would disclose the backing dataset/entity names —
+    // is suppressed entirely.
+    let server = try_server_full(&[RELEASE_SCOPE], "", false)
+        .await
+        .expect("test server builds");
+    let response = server.post(RESOLVE_PATH).json(&subject_body("NID-1")).await;
+    response.assert_status(StatusCode::OK);
+    let body: Value = response.json();
+    assert_eq!(body["claims"]["given_name"], "Ada");
+    assert!(
+        body.get("source").is_none(),
+        "source block must be omitted when include_source_metadata is false: {body}"
+    );
 }
 
 #[tokio::test]
@@ -376,6 +412,37 @@ async fn resolve_unknown_requested_claim_is_denied() {
         .await;
     response.assert_status(StatusCode::FORBIDDEN);
     assert_eq!(response.json::<Value>()["code"], "release.subject_denied");
+}
+
+// ---------------------------------------------------------------------------
+// Subject validation (request-shape, distinct from collapsed denials)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resolve_mismatched_id_type_is_subject_invalid() {
+    // An id_type the profile does not accept is a request-shape error: it is
+    // rejected with a distinct 400 release.subject_invalid (not the collapsed
+    // 403), before any source read, and reveals nothing about subject existence.
+    let server = server().await;
+    let response = server
+        .post(RESOLVE_PATH)
+        .json(&json!({ "subject": { "id_type": "PASSPORT", "value": "NID-1" } }))
+        .await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(response.json::<Value>()["code"], "release.subject_invalid");
+}
+
+#[tokio::test]
+async fn resolve_non_scalar_subject_value_is_subject_invalid() {
+    // A non-scalar subject value cannot identify a row; it is an invalid request
+    // (400 release.subject_invalid), not a subject denial.
+    let server = server().await;
+    let response = server
+        .post(RESOLVE_PATH)
+        .json(&json!({ "subject": { "id_type": "NATIONAL_ID", "value": [] } }))
+        .await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(response.json::<Value>()["code"], "release.subject_invalid");
 }
 
 // ---------------------------------------------------------------------------

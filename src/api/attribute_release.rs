@@ -253,8 +253,10 @@ async fn run_resolve(
     )?;
     let pdp_audit = governed.audit.clone();
 
-    // 5: validate the subject id_type/value. Unknown id_type ⇒ filter.not_allowed;
-    // empty/non-scalar value ⇒ filter.invalid_value. Both precede the read.
+    // 5: validate the subject id_type/value. A mismatched id_type or a
+    // non-scalar/blank value fails closed to release.subject_invalid (400), a
+    // request-shape error distinct from the collapsed subject-denied outcome.
+    // Both precede the read.
     let subject_value = validate_subject(&route.profile, &body.subject)?;
     let subject_id_raw = subject_value.as_str().map(str::to_string);
 
@@ -365,20 +367,27 @@ async fn run_resolve(
 
     // Build the response body purely from profile metadata + projected claims.
     // The raw entity row is never serialized; the subject value appears only if
-    // it was itself projected as a released claim; no subject hash appears.
-    let response = JsonResponse(json!({
-        "profile_id": route.profile.id,
-        "profile_version": route.profile.version,
-        "claims": Value::Object(released),
-        "source": {
-            "dataset": route.dataset_id,
-            "entity": route.entity.name,
-            "subject_id_type": body.subject.id_type,
-            "cardinality": "one",
-            "checked_at": now_rfc3339(),
-        },
-    }))
-    .into_response();
+    // it was itself projected as a released claim; no subject hash appears. The
+    // `source` block is emitted only when the profile opts in via
+    // `response.include_source_metadata` (default off), so a minimizing profile
+    // never discloses the backing dataset/entity names.
+    let mut response_body = Map::new();
+    response_body.insert("profile_id".to_string(), json!(route.profile.id));
+    response_body.insert("profile_version".to_string(), json!(route.profile.version));
+    response_body.insert("claims".to_string(), Value::Object(released));
+    if route.profile.response.include_source_metadata {
+        response_body.insert(
+            "source".to_string(),
+            json!({
+                "dataset": route.dataset_id,
+                "entity": route.entity.name,
+                "subject_id_type": body.subject.id_type,
+                "cardinality": "one",
+                "checked_at": now_rfc3339(),
+            }),
+        );
+    }
+    let response = JsonResponse(Value::Object(response_body)).into_response();
 
     Ok(ResolveSuccess {
         response,
@@ -389,23 +398,26 @@ async fn run_resolve(
     })
 }
 
-/// Validate the subject id_type and value before any source read.
+/// Validate the subject id_type and value before any source read. A mismatched
+/// id_type, or (for an unpinned profile) a blank id_type, or a non-scalar/blank
+/// value fails closed to `release.subject_invalid` (400) — a request-shape error
+/// distinct from the collapsed `release.subject_denied`. Unlike subject
+/// existence, id_type/value validity reveals nothing about the backing registry,
+/// so surfacing it as a distinct, diagnosable code is safe.
 fn validate_subject(
     profile: &AttributeReleaseProfile,
     subject: &ResolveSubject,
 ) -> Result<Value, Error> {
-    // When the profile pins an accepted id_type, an unexpected type is rejected
-    // exactly like an unsupported filter type (`filter.not_allowed`).
     if let Some(expected) = profile.subject.id_type.as_deref() {
         if subject.id_type != expected {
-            return Err(FilterError::NotAllowed.into());
+            return Err(ReleaseError::SubjectInvalid.into());
         }
     } else if subject.id_type.trim().is_empty() {
-        return Err(FilterError::NotAllowed.into());
+        return Err(ReleaseError::SubjectInvalid.into());
     }
     match scalar_subject_value(&subject.value) {
         Some(value) => Ok(value),
-        None => Err(FilterError::InvalidValue.into()),
+        None => Err(ReleaseError::SubjectInvalid.into()),
     }
 }
 

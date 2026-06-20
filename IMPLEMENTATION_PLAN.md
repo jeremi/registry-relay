@@ -180,8 +180,10 @@ any source read):
    `route_identity = "registry-relay.attribute-release"`,
    `GovernedRedactionProjection::DeferredOutput`.
 5. Validate `subject.id_type`/`value` (precedent `filters_from_idtype_query`,
-   `spdci.rs:768`); unknown id_type ⇒ `filter.not_allowed`; empty/non-scalar ⇒
-   `filter.invalid_value`.
+   `spdci.rs:768`); a mismatched/blank id_type or a non-scalar/blank value ⇒
+   `release.subject_invalid` (400) — a request-shape error, distinct from the
+   collapsed `release.subject_denied`, that reveals nothing about subject
+   existence.
 6. Exact lookup: `read_collection` with `fields: Some(profile source fields)`,
    `limit: Some(2)`, filters = `[subject_eq]` (+ profile-bound trusted filters). First
    projection enforcement of "only configured source fields."
@@ -190,7 +192,8 @@ any source read):
 9. Project to claim names (second layer): resolve claim set (absent ⇒ default; `[]` ⇒
    400; unknown ⇒ deny); drop governed `redaction_fields`; build response field-by-field
    with `json!` so source fields cannot leak and the raw subject value never appears
-   outside released claims. `source` block from profile metadata only.
+   outside released claims. The `source` block (profile metadata only) is emitted
+   only when `response.include_source_metadata` is set (default off).
 10. Audit (attach `AuditContextExt`; `attach_pdp_audit`).
 
 Response echoes resolved `profile_id` + `profile_version`. JSON-only; `Content-Type`
