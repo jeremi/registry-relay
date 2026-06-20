@@ -289,7 +289,7 @@ async fn run_resolve(
     // request-shape error distinct from the collapsed subject-denied outcome.
     // Both precede the read.
     let subject_value = validate_subject(&route.profile, &body.subject)?;
-    let subject_id_raw = subject_value.as_str().map(str::to_string);
+    let subject_id_raw = subject_audit_raw(&subject_value);
 
     // Resolve the requested claim set: absent ⇒ profile default; `[]` ⇒ 400;
     // any unknown requested claim ⇒ deny. Done before the read so an unknown
@@ -467,6 +467,21 @@ fn scalar_subject_value(value: &Value) -> Option<Value> {
     match value {
         Value::String(text) if !text.trim().is_empty() => Some(value.clone()),
         Value::Number(_) | Value::Bool(_) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// Canonicalize an accepted scalar subject value into the raw string the audit
+/// pipeline keyed-hashes (`ar_subject_id_hash`). Strings use their text; numbers
+/// and bools use their canonical JSON scalar form. This closes the gap where a
+/// non-string subject was accepted for the lookup but left `subject_id_raw`
+/// `None`, so it never appeared (hashed) in the audit trail. The raw value is
+/// only ever hashed downstream — it is never logged or serialized in the clear.
+fn subject_audit_raw(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
         _ => None,
     }
 }
@@ -818,4 +833,36 @@ fn with_audit_context(mut response: Response, route: &RouteState, audit: Resolve
         response.extensions_mut().insert(context);
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subject_audit_raw_canonicalizes_every_accepted_scalar() {
+        assert_eq!(
+            subject_audit_raw(&json!("NID-1")),
+            Some("NID-1".to_string())
+        );
+        assert_eq!(subject_audit_raw(&json!(42)), Some("42".to_string()));
+        assert_eq!(subject_audit_raw(&json!(true)), Some("true".to_string()));
+        // Non-scalars carry no audit raw (and are rejected before any read).
+        assert_eq!(subject_audit_raw(&json!(null)), None);
+        assert_eq!(subject_audit_raw(&json!({"a": 1})), None);
+    }
+
+    #[test]
+    fn every_accepted_subject_has_an_audit_raw() {
+        // The invariant the audit-canonicalization fix guarantees: any value
+        // `scalar_subject_value` accepts yields a hashable `subject_id_raw`, so a
+        // non-string subject is never silently dropped from the audit trail.
+        for value in [json!("NID-1"), json!(42), json!(true)] {
+            let accepted = scalar_subject_value(&value).expect("scalar accepted");
+            assert!(
+                subject_audit_raw(&accepted).is_some(),
+                "accepted subject {value} must have an audit raw"
+            );
+        }
+    }
 }
