@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked --features spdci-api-standards,standards-cel-mapping,attribute-release && \
     cp /workspace/registry_relay/target/release/registry-relay /usr/local/bin/registry-relay
 
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
+FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716 AS runtime
 
 RUN groupadd --system --gid 10001 registry_relay && \
     useradd --system --uid 10001 --gid registry_relay --home-dir /var/lib/registry-relay --shell /usr/sbin/nologin registry_relay && \
