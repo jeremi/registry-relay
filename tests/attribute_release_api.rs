@@ -155,6 +155,7 @@ datasets:
             version: v1
             title: Civil identity bundle
             description: Minimised identity claims for eSignet.
+            purpose: identity
             release_scope: {RELEASE_SCOPE}
             subject:
               input: subject_token
