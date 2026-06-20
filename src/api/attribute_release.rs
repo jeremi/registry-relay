@@ -220,6 +220,7 @@ impl From<GovernedAccessError> for ResolveRunError {
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn run_resolve(
     runtime: &RuntimeSnapshot,
     route: &RouteState,
@@ -421,6 +422,7 @@ fn scalar_subject_value(value: &Value) -> Option<Value> {
 /// Resolve the effective claim set. Absent ⇒ the profile default (all
 /// configured claims); explicit `[]` ⇒ 400 invalid value; any name not in the
 /// profile ⇒ deny (`release.subject_denied`).
+#[allow(clippy::result_large_err)]
 fn resolve_requested_claims<'a>(
     route: &'a RouteState,
     requested: &Option<Vec<String>>,
