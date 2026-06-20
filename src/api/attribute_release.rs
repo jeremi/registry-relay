@@ -31,7 +31,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::api::governed::{
-    attach_pdp_audit, require_governed_read_access, GovernedAccessError,
+    attach_pdp_audit, purpose_header_value, require_governed_read_access, GovernedAccessError,
     GovernedRedactionProjection, GovernedRequestInfo,
 };
 use crate::attribute_release::{evaluate_release_predicate, evaluate_release_scalar};
@@ -260,6 +260,29 @@ async fn run_resolve(
         },
     )?;
     let pdp_audit = governed.audit.clone();
+
+    // 4b: profile-level purpose binding. When a profile declares a `purpose`, the
+    // `data-purpose` header must be present and equal it — enforced here, before
+    // the source read, independent of whether the backing entity governs
+    // purposes (`require_governed_read_access` only checks purpose when the entity
+    // does). When the entity also governs, this is an additional equality
+    // constraint on the same header. A profile with no purpose keeps the prior
+    // behaviour. Missing header ⇒ 400 auth.purpose_required; mismatch ⇒ 403
+    // auth.purpose_denied — surfaced like the entity-governed purpose denials,
+    // not collapsed into the subject-denied outcome.
+    if let Some(profile_purpose) = route.profile.purpose.as_deref() {
+        match purpose_header_value(headers) {
+            Some(value) if value == profile_purpose => {}
+            Some(_) => {
+                return Err(ResolveRunError::from(Error::from(AuthError::PurposeDenied)));
+            }
+            None => {
+                return Err(ResolveRunError::from(Error::from(
+                    AuthError::PurposeRequired,
+                )));
+            }
+        }
+    }
 
     // 5: validate the subject id_type/value. A mismatched id_type or a
     // non-scalar/blank value fails closed to release.subject_invalid (400), a

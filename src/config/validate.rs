@@ -1327,6 +1327,26 @@ fn is_valid_id(s: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// Attribute-release profile ids additionally allow hyphens. They are URL path
+/// segments and the eSignet contract uses ids like `esignet-civil-userinfo`, so
+/// the charset is `[a-z][a-z0-9_-]*` (the `is_valid_id` set plus `-`).
+fn is_valid_profile_id(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Release claim names map to OIDC/UserInfo claims, which include dotted names
+/// such as `address.region`. Each dot-separated segment must match the
+/// snake-case `is_valid_id` charset; a leading, trailing, or doubled dot (an
+/// empty segment) is rejected.
+fn is_valid_claim_name(s: &str) -> bool {
+    s.split('.').all(is_valid_id)
+}
+
 /// Match the deployment finding id pattern
 /// `^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_-]*)*$` without pulling in a regex crate.
 ///
@@ -3556,8 +3576,8 @@ fn validate_entity_release_profile(
     if profile.id.trim().is_empty() {
         return release_error("attribute_release_profiles id must not be empty");
     }
-    if !is_valid_id(&profile.id) {
-        return release_error("attribute_release_profiles id does not match ^[a-z][a-z0-9_]*$");
+    if !is_valid_profile_id(&profile.id) {
+        return release_error("attribute_release_profiles id does not match ^[a-z][a-z0-9_-]*$");
     }
     if profile.version.trim().is_empty() {
         return release_error("attribute_release_profiles version must not be empty");
@@ -3581,9 +3601,10 @@ fn validate_entity_release_profile(
     let mut claim_names: HashSet<&str> = HashSet::new();
     let mut has_required = false;
     for claim in &profile.claims {
-        if !is_valid_id(&claim.name) {
+        if !is_valid_claim_name(&claim.name) {
             return release_error(
-                "attribute_release_profiles claim name does not match ^[a-z][a-z0-9_]*$",
+                "attribute_release_profiles claim name does not match \
+                 ^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$",
             );
         }
         if !claim_names.insert(claim.name.as_str()) {
@@ -4233,6 +4254,33 @@ mod tests {
         assert!(!is_valid_id("1_social"));
         assert!(!is_valid_id("social-registry"));
         assert!(!is_valid_id("social registry"));
+    }
+
+    #[test]
+    fn profile_id_allows_hyphens_but_not_uppercase_or_leading_dash() {
+        // eSignet contract ids use hyphens.
+        assert!(is_valid_profile_id("esignet-civil-userinfo"));
+        assert!(is_valid_profile_id("civil_identity"));
+        assert!(is_valid_profile_id("a1-b2_c3"));
+        assert!(!is_valid_profile_id(""));
+        assert!(!is_valid_profile_id("-leading"));
+        assert!(!is_valid_profile_id("1-leading-digit"));
+        assert!(!is_valid_profile_id("Esignet"));
+        assert!(!is_valid_profile_id("with space"));
+    }
+
+    #[test]
+    fn claim_name_allows_dotted_segments_but_not_empty_segments() {
+        // OIDC UserInfo claim names include dotted forms.
+        assert!(is_valid_claim_name("address.region"));
+        assert!(is_valid_claim_name("given_name"));
+        assert!(is_valid_claim_name("a.b.c"));
+        assert!(!is_valid_claim_name(""));
+        assert!(!is_valid_claim_name(".region"));
+        assert!(!is_valid_claim_name("address."));
+        assert!(!is_valid_claim_name("address..region"));
+        assert!(!is_valid_claim_name("Address.Region"));
+        assert!(!is_valid_claim_name("address-region"));
     }
 
     #[test]
