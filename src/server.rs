@@ -237,6 +237,7 @@ fn build_app_with_provenance_metadata_and_metrics(
     #[cfg(feature = "ogcapi-records")]
     let protected = protected.merge(api::records_router());
     let protected = merge_spdci_routes(protected);
+    let protected = merge_attribute_release_routes(protected);
     let protected = auth_layer(protected, auth);
 
     // Merge public + protected; everything above this point is inside
@@ -267,6 +268,16 @@ fn merge_spdci_routes(router: Router) -> Router {
 
 #[cfg(not(feature = "spdci-api-standards"))]
 fn merge_spdci_routes(router: Router) -> Router {
+    router
+}
+
+#[cfg(feature = "attribute-release")]
+fn merge_attribute_release_routes(router: Router) -> Router {
+    router.merge(api::attribute_release_router())
+}
+
+#[cfg(not(feature = "attribute-release"))]
+fn merge_attribute_release_routes(router: Router) -> Router {
     router
 }
 
