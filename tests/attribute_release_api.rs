@@ -22,6 +22,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::execution::context::SessionContext;
 use registry_relay::api::attribute_release_router;
+use registry_relay::attribute_release::AttributeReleaseEvaluator;
 use registry_relay::auth::{AuthMode, Principal, ScopeSet};
 use registry_relay::config::{self, DatasetId, ResourceId};
 use registry_relay::entity::EntityRegistry;
@@ -290,11 +291,13 @@ async fn try_server_full(
         Arc::clone(&ctx),
         Arc::clone(&registry),
     ));
+    let evaluator = Arc::new(AttributeReleaseEvaluator::from_config(&config));
     let app = attribute_release_router::<()>()
         .layer(Extension(principal(scopes)))
         .layer(Extension(readiness))
         .layer(Extension(query))
         .layer(Extension(registry))
+        .layer(Extension(evaluator))
         .layer(Extension(config));
     Ok(TestServer::new(app))
 }

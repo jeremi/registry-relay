@@ -51,6 +51,13 @@ pub enum AttributeReleaseError {
 #[cfg(feature = "attribute-release")]
 pub use enabled::{
     evaluate_release_predicate, evaluate_release_scalar, validate_release_expression,
+    AttributeReleaseEvaluator,
+};
+
+#[cfg(not(feature = "attribute-release"))]
+pub use disabled::{
+    evaluate_release_predicate, evaluate_release_scalar, validate_release_expression,
+    AttributeReleaseEvaluator,
 };
 
 #[cfg(feature = "attribute-release")]
@@ -58,9 +65,11 @@ mod enabled {
     use super::AttributeReleaseError;
 
     use std::collections::HashMap;
-    use std::sync::{Arc, OnceLock, RwLock};
+    use std::sync::{Arc, RwLock};
 
     use serde_json::{json, Value};
+
+    use crate::config::Config;
 
     use crosswalk_core::{
         CompiledMapping, EvaluationInput, MappingError, MappingRuntime, RuntimeOptions,
@@ -71,6 +80,162 @@ mod enabled {
     /// trivially adjustable in one place.
     const RECORD_NAME: &str = "release";
     const FIELD_NAME: &str = "value";
+
+    pub struct AttributeReleaseEvaluator {
+        runtime: Arc<MappingRuntime>,
+        cache: RwLock<HashMap<String, Arc<CompiledMapping>>>,
+    }
+
+    impl std::fmt::Debug for AttributeReleaseEvaluator {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("AttributeReleaseEvaluator")
+                .field("runtime", &"<runtime>")
+                .field("cache_size", &self.cached_expression_count())
+                .finish()
+        }
+    }
+
+    impl Default for AttributeReleaseEvaluator {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl AttributeReleaseEvaluator {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                runtime: Arc::new(MappingRuntime::new(RuntimeOptions::default())),
+                cache: RwLock::new(HashMap::new()),
+            }
+        }
+
+        /// Build the evaluator for one validated runtime snapshot and prewarm it
+        /// with every CEL expression declared by that snapshot. When a new runtime
+        /// snapshot replaces the old one, this per-snapshot cache is dropped with
+        /// the old snapshot instead of accumulating expressions process-wide.
+        #[must_use]
+        pub fn from_config(config: &Config) -> Self {
+            let evaluator = Self::new();
+            for cel in configured_expressions(config) {
+                if let Err(err) = evaluator.compiled_mapping(cel) {
+                    tracing::error!(
+                        code = "attribute_release.config.expression_prewarm_failed",
+                        error = %err,
+                        "validated attribute-release expression failed to precompile"
+                    );
+                }
+            }
+            evaluator
+        }
+
+        /// Evaluate a release **predicate** over a subject record. Fails closed:
+        /// compile error, evaluation error, missing field, or a non-boolean result
+        /// all return `Err` rather than a permissive `true`.
+        pub fn evaluate_release_predicate(
+            &self,
+            cel: &str,
+            record: &Value,
+        ) -> Result<bool, AttributeReleaseError> {
+            let value = self.evaluate_single_field(cel, record)?;
+            match value.as_bool() {
+                Some(b) => Ok(b),
+                None => Err(AttributeReleaseError::TypeMismatch(
+                    predicate_type_diagnostic(&value),
+                )),
+            }
+        }
+
+        /// Evaluate a computed-claim **scalar** over a subject record, returning
+        /// the raw [`Value`]. Fails closed: a missing or erroring expression
+        /// returns `Err` rather than silently dropping the claim. A JSON `null`
+        /// result is treated as a missing value (fail-closed) so an absent
+        /// computed claim is never silently emitted as `null`.
+        pub fn evaluate_release_scalar(
+            &self,
+            cel: &str,
+            record: &Value,
+        ) -> Result<Value, AttributeReleaseError> {
+            let value = self.evaluate_single_field(cel, record)?;
+            if value.is_null() {
+                return Err(AttributeReleaseError::MissingField(
+                    "field=value kind=null".to_string(),
+                ));
+            }
+            Ok(value)
+        }
+
+        /// Synthesize the one-field document, compile it into this snapshot's
+        /// cache, evaluate it against `record`, and read the single output field
+        /// back. Shared by both predicate and scalar entry points so the
+        /// fail-closed handling is identical.
+        ///
+        /// CEL is compiled once per runtime snapshot and cached by expression
+        /// text. Subsequent resolves for the same snapshot reuse the compiled
+        /// mapping; config reload naturally drops stale expressions with the old
+        /// snapshot.
+        fn evaluate_single_field(
+            &self,
+            cel: &str,
+            record: &Value,
+        ) -> Result<Value, AttributeReleaseError> {
+            let mapping = self.compiled_mapping(cel)?;
+
+            let out = self.runtime.evaluate(
+                mapping.as_ref(),
+                EvaluationInput {
+                    source: record.clone(),
+                    context: json!({}),
+                },
+            );
+
+            if !out.errors.is_empty() {
+                return Err(AttributeReleaseError::Eval(issue_diagnostics(&out.errors)));
+            }
+
+            // A false predicate may surface as zero records (emit suppressed) rather
+            // than a false-valued field; both forms must be distinguishable from an
+            // erroring evaluation. We read the single output field back and treat an
+            // absent field as a fail-closed MissingField. The predicate wrapper maps
+            // a missing field to deny; the scalar wrapper maps it to drop-as-error.
+            // CI-VERIFY: confirm against CROSSWALK_REF whether a false predicate
+            // yields a `false`-valued record field or zero records; if zero-record,
+            // callers translate MissingField → deny (still fail-closed).
+            read_single_field(out.records)
+        }
+
+        /// Compile `cel` once and cache the resulting `Arc<CompiledMapping>` in
+        /// this evaluator. CEL only ever comes from validated config (a finite set),
+        /// so the cache is bounded by the active runtime snapshot's configuration.
+        fn compiled_mapping(
+            &self,
+            cel: &str,
+        ) -> Result<Arc<CompiledMapping>, AttributeReleaseError> {
+            {
+                let guard = self
+                    .cache
+                    .read()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if let Some(mapping) = guard.get(cel) {
+                    return Ok(Arc::clone(mapping));
+                }
+            }
+            let mapping = Arc::new(compile(self.runtime.as_ref(), cel)?);
+            let mut guard = self
+                .cache
+                .write()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let entry = guard.entry(cel.to_string()).or_insert(mapping);
+            Ok(Arc::clone(entry))
+        }
+
+        fn cached_expression_count(&self) -> usize {
+            self.cache
+                .read()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .len()
+        }
+    }
 
     /// Compile-only validation hook used at config load. Fails closed: an
     /// expression that does not compile is rejected before the runtime serves
@@ -87,13 +252,7 @@ mod enabled {
         cel: &str,
         record: &Value,
     ) -> Result<bool, AttributeReleaseError> {
-        let value = evaluate_single_field(cel, record)?;
-        match value.as_bool() {
-            Some(b) => Ok(b),
-            None => Err(AttributeReleaseError::TypeMismatch(
-                predicate_type_diagnostic(&value),
-            )),
-        }
+        AttributeReleaseEvaluator::new().evaluate_release_predicate(cel, record)
     }
 
     /// Evaluate a computed-claim **scalar** over a subject record, returning the
@@ -105,88 +264,7 @@ mod enabled {
         cel: &str,
         record: &Value,
     ) -> Result<Value, AttributeReleaseError> {
-        let value = evaluate_single_field(cel, record)?;
-        if value.is_null() {
-            return Err(AttributeReleaseError::MissingField(
-                "field=value kind=null".to_string(),
-            ));
-        }
-        Ok(value)
-    }
-
-    /// Synthesize the one-field document, compile it (once, cached), evaluate it
-    /// against `record`, and read the single output field back. Shared by both
-    /// the predicate and scalar entry points so the fail-closed handling is
-    /// identical.
-    ///
-    /// CEL is compiled lazily on first use and cached process-wide by expression
-    /// text (see [`compiled_mapping`]); subsequent resolves reuse the compiled
-    /// mapping instead of recompiling on the identity hot path. This matches the
-    /// caching the SP DCI / PublicSchema mappers already do.
-    fn evaluate_single_field(cel: &str, record: &Value) -> Result<Value, AttributeReleaseError> {
-        let mapping = compiled_mapping(cel)?;
-
-        let out = shared_runtime().evaluate(
-            &mapping,
-            EvaluationInput {
-                source: record.clone(),
-                context: json!({}),
-            },
-        );
-
-        if !out.errors.is_empty() {
-            return Err(AttributeReleaseError::Eval(issue_diagnostics(&out.errors)));
-        }
-
-        // A false predicate may surface as zero records (emit suppressed) rather
-        // than a false-valued field; both forms must be distinguishable from an
-        // erroring evaluation. We read the single output field back and treat an
-        // absent field as a fail-closed MissingField. The predicate wrapper maps
-        // a missing field to deny; the scalar wrapper maps it to drop-as-error.
-        // CI-VERIFY: confirm against CROSSWALK_REF whether a false predicate
-        // yields a `false`-valued record field or zero records; if zero-record,
-        // callers translate MissingField → deny (still fail-closed).
-        read_single_field(out.records)
-    }
-
-    /// Process-wide runtime used to both compile and evaluate cached mappings, so
-    /// each mapping is evaluated by the runtime that compiled it. `evaluate` takes
-    /// `&self`, and the SP DCI adapter already shares one `MappingRuntime` across
-    /// concurrent requests, so a single shared instance is safe here.
-    fn shared_runtime() -> &'static MappingRuntime {
-        static RUNTIME: OnceLock<MappingRuntime> = OnceLock::new();
-        RUNTIME.get_or_init(|| MappingRuntime::new(RuntimeOptions::default()))
-    }
-
-    /// The compiled-mapping cache, keyed by raw CEL expression text.
-    fn cel_cache() -> &'static RwLock<HashMap<String, Arc<CompiledMapping>>> {
-        static CACHE: OnceLock<RwLock<HashMap<String, Arc<CompiledMapping>>>> = OnceLock::new();
-        CACHE.get_or_init(|| RwLock::new(HashMap::new()))
-    }
-
-    /// Compile `cel` once and cache the resulting `Arc<CompiledMapping>` by
-    /// expression text, returning a clone on later calls. CEL only ever comes from
-    /// validated config (a finite set), so the cache is bounded by configuration
-    /// size, never by request data. Compilation is the expensive step; caching it
-    /// removes the per-resolve recompile from the identity auth path. This mirrors
-    /// the `Arc<CompiledMapping>` caching the SP DCI adapter already uses.
-    fn compiled_mapping(cel: &str) -> Result<Arc<CompiledMapping>, AttributeReleaseError> {
-        let cache = cel_cache();
-        // Fast path: an explicit scope drops the read guard before the (rare)
-        // write lock below, so we never hold a read lock across a write.
-        {
-            let guard = cache.read().unwrap_or_else(|poison| poison.into_inner());
-            if let Some(mapping) = guard.get(cel) {
-                return Ok(Arc::clone(mapping));
-            }
-        }
-        // Slow path: compile and insert. A concurrent double-compile is collapsed
-        // to a single stored value by the entry API, keeping one mapping per
-        // distinct expression.
-        let mapping = Arc::new(compile(shared_runtime(), cel)?);
-        let mut guard = cache.write().unwrap_or_else(|poison| poison.into_inner());
-        let entry = guard.entry(cel.to_string()).or_insert(mapping);
-        Ok(Arc::clone(entry))
+        AttributeReleaseEvaluator::new().evaluate_release_scalar(cel, record)
     }
 
     /// Compile the synthesized document, mapping any compile error to a
@@ -241,6 +319,27 @@ mod enabled {
             field = FIELD_NAME,
             expr = expr,
         )
+    }
+
+    fn configured_expressions(config: &Config) -> Vec<&str> {
+        let mut expressions = Vec::new();
+        for dataset in &config.datasets {
+            for entity in &dataset.entities {
+                for profile in &entity.attribute_release_profiles {
+                    if let Some(conditions) = profile.release_conditions.as_ref() {
+                        expressions.push(conditions.expression.cel.as_str());
+                    }
+                    expressions.extend(
+                        profile
+                            .claims
+                            .iter()
+                            .filter_map(|claim| claim.expression.as_ref())
+                            .map(|expression| expression.cel.as_str()),
+                    );
+                }
+            }
+        }
+        expressions
     }
 
     /// Read the single output field back from the evaluated records. Returns
@@ -307,7 +406,9 @@ mod enabled {
         #[test]
         fn predicate_true() {
             let record = json!({ "deceased": false });
-            let allowed = evaluate_release_predicate("source.deceased == false", &record)
+            let evaluator = AttributeReleaseEvaluator::new();
+            let allowed = evaluator
+                .evaluate_release_predicate("source.deceased == false", &record)
                 .expect("predicate evaluates");
             assert!(allowed);
         }
@@ -315,7 +416,9 @@ mod enabled {
         #[test]
         fn predicate_false() {
             let record = json!({ "deceased": true });
-            let allowed = evaluate_release_predicate("source.deceased == false", &record)
+            let evaluator = AttributeReleaseEvaluator::new();
+            let allowed = evaluator
+                .evaluate_release_predicate("source.deceased == false", &record)
                 .expect("predicate evaluates");
             assert!(!allowed);
         }
@@ -323,9 +426,10 @@ mod enabled {
         #[test]
         fn scalar_concat() {
             let record = json!({ "given_name": "Ada", "surname": "Lovelace" });
-            let value =
-                evaluate_release_scalar("source.given_name + ' ' + source.surname", &record)
-                    .expect("scalar evaluates");
+            let evaluator = AttributeReleaseEvaluator::new();
+            let value = evaluator
+                .evaluate_release_scalar("source.given_name + ' ' + source.surname", &record)
+                .expect("scalar evaluates");
             assert_eq!(value, json!("Ada Lovelace"));
         }
 
@@ -342,14 +446,37 @@ mod enabled {
         fn compiled_mapping_is_cached_and_reused() {
             // The fix for the per-resolve recompile: identical expression text
             // must resolve to one shared compiled mapping, distinct text must not.
-            let a = compiled_mapping("source.deceased == false").expect("compiles");
-            let b = compiled_mapping("source.deceased == false").expect("compiles");
+            let evaluator = AttributeReleaseEvaluator::new();
+            let a = evaluator
+                .compiled_mapping("source.deceased == false")
+                .expect("compiles");
+            let b = evaluator
+                .compiled_mapping("source.deceased == false")
+                .expect("compiles");
             assert!(
                 Arc::ptr_eq(&a, &b),
                 "identical expressions must share one cached compiled mapping"
             );
-            let c = compiled_mapping("source.given_name").expect("compiles");
+            let c = evaluator
+                .compiled_mapping("source.given_name")
+                .expect("compiles");
             assert!(!Arc::ptr_eq(&a, &c), "distinct expressions must not alias");
+        }
+
+        #[test]
+        fn compiled_mapping_cache_is_per_evaluator() {
+            let first = AttributeReleaseEvaluator::new();
+            let second = AttributeReleaseEvaluator::new();
+            let a = first
+                .compiled_mapping("source.deceased == false")
+                .expect("first compiles");
+            let b = second
+                .compiled_mapping("source.deceased == false")
+                .expect("second compiles");
+            assert!(
+                !Arc::ptr_eq(&a, &b),
+                "separate runtime snapshots must not share stale compiled CEL"
+            );
         }
 
         #[test]
@@ -357,7 +484,8 @@ mod enabled {
             // The referenced source field is absent. A predicate that cannot be
             // evaluated must deny (Err), never silently allow.
             let record = json!({ "given_name": "Ada" });
-            let result = evaluate_release_predicate("source.deceased == false", &record);
+            let evaluator = AttributeReleaseEvaluator::new();
+            let result = evaluator.evaluate_release_predicate("source.deceased == false", &record);
             assert!(
                 result.is_err(),
                 "missing source field must fail closed, got {result:?}"
@@ -369,7 +497,8 @@ mod enabled {
             // A computed claim whose inputs are absent must error, never be
             // silently dropped or emitted as null.
             let record = json!({ "given_name": "Ada" });
-            let result = evaluate_release_scalar("source.surname", &record);
+            let evaluator = AttributeReleaseEvaluator::new();
+            let result = evaluator.evaluate_release_scalar("source.surname", &record);
             assert!(
                 result.is_err(),
                 "missing source field must fail closed, got {result:?}"
@@ -382,10 +511,75 @@ mod enabled {
             let record = json!({ "deceased": true, "national_id": "SECRET-451123" });
             // Force a type mismatch by treating a string-returning expression as
             // a predicate.
-            let result = evaluate_release_predicate("source.national_id", &record);
+            let evaluator = AttributeReleaseEvaluator::new();
+            let result = evaluator.evaluate_release_predicate("source.national_id", &record);
             let err = result.expect_err("string is not a boolean predicate");
             assert!(matches!(err, AttributeReleaseError::TypeMismatch(_)));
             assert!(!err.to_string().contains("SECRET-451123"));
         }
+    }
+}
+
+#[cfg(not(feature = "attribute-release"))]
+mod disabled {
+    use serde_json::Value;
+
+    use crate::config::Config;
+
+    use super::AttributeReleaseError;
+
+    #[derive(Debug, Default)]
+    pub struct AttributeReleaseEvaluator;
+
+    impl AttributeReleaseEvaluator {
+        #[must_use]
+        pub fn new() -> Self {
+            Self
+        }
+
+        #[must_use]
+        pub fn from_config(_config: &Config) -> Self {
+            Self
+        }
+
+        pub fn evaluate_release_predicate(
+            &self,
+            cel: &str,
+            record: &Value,
+        ) -> Result<bool, AttributeReleaseError> {
+            evaluate_release_predicate(cel, record)
+        }
+
+        pub fn evaluate_release_scalar(
+            &self,
+            cel: &str,
+            record: &Value,
+        ) -> Result<Value, AttributeReleaseError> {
+            evaluate_release_scalar(cel, record)
+        }
+    }
+
+    pub fn validate_release_expression(_cel: &str) -> Result<(), AttributeReleaseError> {
+        Err(AttributeReleaseError::Compile(
+            "kind=feature_disabled".to_string(),
+        ))
+    }
+
+    pub fn evaluate_release_predicate(
+        _cel: &str,
+        _record: &Value,
+    ) -> Result<bool, AttributeReleaseError> {
+        Err(AttributeReleaseError::Eval(
+            "kind=feature_disabled".to_string(),
+        ))
+    }
+
+    pub fn evaluate_release_scalar(
+        _cel: &str,
+        _record: &Value,
+    ) -> Result<Value, AttributeReleaseError> {
+        Err(AttributeReleaseError::Eval(
+            "kind=feature_disabled".to_string(),
+        ))
     }
 }

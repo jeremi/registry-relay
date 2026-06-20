@@ -37,7 +37,7 @@ use crate::api::governed::{
     attach_pdp_audit, purpose_header_value, require_governed_read_access, GovernedAccessError,
     GovernedRedactionProjection, GovernedRequestInfo,
 };
-use crate::attribute_release::{evaluate_release_predicate, evaluate_release_scalar};
+use crate::attribute_release::AttributeReleaseEvaluator;
 use crate::audit::AuditContextExt;
 use crate::auth::scopes::require_scope;
 use crate::auth::Principal;
@@ -349,7 +349,10 @@ async fn run_resolve(
     // 8: release-condition predicate (CEL). A false predicate, or any evaluation
     // failure, fails closed to SubjectReleaseDenied.
     if let Some(conditions) = route.profile.release_conditions.as_ref() {
-        let allowed = evaluate_release_predicate(&conditions.expression.cel, &row).unwrap_or(false);
+        let allowed = route
+            .evaluator
+            .evaluate_release_predicate(&conditions.expression.cel, &row)
+            .unwrap_or(false);
         if !allowed {
             return Err(ResolveRunError::release(
                 ReleaseError::SubjectReleaseDenied,
@@ -389,7 +392,7 @@ async fn run_resolve(
             }
             continue;
         }
-        match claim_value(claim, &projection_row) {
+        match claim_value(&route.evaluator, claim, &projection_row) {
             Some(value) => {
                 released.insert(claim.name.clone(), value);
             }
@@ -566,7 +569,11 @@ fn redact_row(row: &Value, redaction_fields: &BTreeSet<String>) -> Value {
 /// Compute a single claim value from the projected subject row. A direct claim
 /// reads its source field (absent ⇒ `None`); a computed claim evaluates its CEL
 /// scalar (any failure ⇒ `None`, so a required computed claim fails closed).
-fn claim_value(claim: &ReleaseClaimConfig, row: &Value) -> Option<Value> {
+fn claim_value(
+    evaluator: &AttributeReleaseEvaluator,
+    claim: &ReleaseClaimConfig,
+    row: &Value,
+) -> Option<Value> {
     if let Some(field) = claim.source_field.as_deref() {
         return match row.get(field) {
             Some(Value::Null) | None => None,
@@ -574,7 +581,7 @@ fn claim_value(claim: &ReleaseClaimConfig, row: &Value) -> Option<Value> {
         };
     }
     if let Some(expression) = claim.expression.as_ref() {
-        return evaluate_release_scalar(&expression.cel, row).ok();
+        return evaluator.evaluate_release_scalar(&expression.cel, row).ok();
     }
     None
 }
@@ -680,6 +687,7 @@ struct RouteState {
     dataset_id: String,
     source_fields: Vec<String>,
     query: Arc<EntityQueryEngine>,
+    evaluator: Arc<AttributeReleaseEvaluator>,
 }
 
 impl RouteState {
@@ -699,6 +707,9 @@ impl RouteState {
             .cloned()
             .ok_or(SchemaError::UnknownResource)?;
         let query = runtime.query().ok_or(SchemaError::UnknownResource)?;
+        let evaluator = runtime
+            .attribute_release_evaluator()
+            .ok_or(SchemaError::UnknownResource)?;
         let source_fields = profile_source_fields(&profile, &entity);
         Ok(Self {
             profile,
@@ -706,6 +717,7 @@ impl RouteState {
             dataset_id,
             source_fields,
             query,
+            evaluator,
         })
     }
 }
