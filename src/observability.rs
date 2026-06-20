@@ -592,6 +592,7 @@ fn endpoint_kind_label(kind: EndpointKind) -> &'static str {
         EndpointKind::OgcFeature => "ogc_feature",
         EndpointKind::Admin => "admin",
         EndpointKind::Openapi => "openapi",
+        EndpointKind::AttributeRelease => "attribute_release",
         EndpointKind::Other => "other",
     }
 }
