@@ -1558,8 +1558,7 @@ async fn attribute_release_denied_outcome_auditable() {
     assert_eq!(parsed["error_code"], "release.subject_denied");
     // Internal outcome must be present and distinct from the public code.
     assert_eq!(
-        parsed["ar_internal_outcome"],
-        "release.subject_not_found",
+        parsed["ar_internal_outcome"], "release.subject_not_found",
         "fine-grained internal outcome must be auditable even through public collapse"
     );
     // Raw subject must never appear.

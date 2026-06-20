@@ -927,8 +927,7 @@ pub async fn audit_layer(
 
     // Compute the keyed subject hash for attribute-release requests.
     // The raw value must NEVER be written to the record or logged here.
-    let ar_subject_id_hash =
-        audit_ar_subject_id_hash(&context, &settings.hash_hasher);
+    let ar_subject_id_hash = audit_ar_subject_id_hash(&context, &settings.hash_hasher);
 
     let record = AuditRecord {
         ts: now_iso8601_millis(),
@@ -1079,10 +1078,7 @@ fn audit_table_id_hash(context: &AuditContextExt, hasher: &AuditKeyHasher) -> Op
 ///
 /// The hash field domain is `"ar_subject_id:{profile_id}:{id_type}"` which
 /// prevents cross-profile collisions for the same raw subject value.
-fn audit_ar_subject_id_hash(
-    context: &AuditContextExt,
-    hasher: &AuditKeyHasher,
-) -> Option<String> {
+fn audit_ar_subject_id_hash(context: &AuditContextExt, hasher: &AuditKeyHasher) -> Option<String> {
     let raw = context.ar_subject_id_raw.as_ref()?.as_str();
     let profile_id = context.ar_profile_id.as_deref()?;
     let id_type = context.ar_subject_id_type.as_deref()?;

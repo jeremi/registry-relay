@@ -290,7 +290,10 @@ fn expected_table() -> Vec<(&'static str, StatusCode)> {
         ("release.subject_denied", StatusCode::FORBIDDEN),
         ("release.subject_denied", StatusCode::FORBIDDEN),
         ("release.subject_denied", StatusCode::FORBIDDEN),
-        ("release.source_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+        (
+            "release.source_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
         ("internal.timeout", StatusCode::GATEWAY_TIMEOUT),
         ("internal.payload_too_large", StatusCode::PAYLOAD_TOO_LARGE),
         ("internal.uri_too_long", StatusCode::URI_TOO_LONG),
@@ -435,10 +438,7 @@ async fn snapshot_one_variant_per_namespace() {
             }),
         ),
         ("query", Error::Query(QueryError::CursorInvalid)),
-        (
-            "release",
-            Error::Release(ReleaseError::SubjectNotFound),
-        ),
+        ("release", Error::Release(ReleaseError::SubjectNotFound)),
         ("internal", Error::Internal(InternalError::Timeout)),
     ];
     for (namespace, err) in samples {
@@ -587,10 +587,7 @@ async fn collapsed_subject_denied_variants_render_identically() {
             *status, first_status,
             "status differs at index {i}: {status} vs {first_status}"
         );
-        assert_eq!(
-            json, first_json,
-            "JSON body differs at index {i}"
-        );
+        assert_eq!(json, first_json, "JSON body differs at index {i}");
     }
 
     // Verify the specific expected values.
@@ -605,22 +602,13 @@ async fn collapsed_subject_denied_variants_render_identically() {
 #[test]
 fn audit_code_differs_from_public_code_for_collapsed_variants() {
     let cases = [
-        (
-            ReleaseError::SubjectNotFound,
-            "release.subject_not_found",
-        ),
-        (
-            ReleaseError::SubjectAmbiguous,
-            "release.subject_ambiguous",
-        ),
+        (ReleaseError::SubjectNotFound, "release.subject_not_found"),
+        (ReleaseError::SubjectAmbiguous, "release.subject_ambiguous"),
         (
             ReleaseError::SubjectReleaseDenied,
             "release.subject_release_denied",
         ),
-        (
-            ReleaseError::ClaimUnavailable,
-            "release.claim_unavailable",
-        ),
+        (ReleaseError::ClaimUnavailable, "release.claim_unavailable"),
     ];
     for (variant, expected_audit) in cases {
         let public_code = Error::Release(variant.clone()).code();

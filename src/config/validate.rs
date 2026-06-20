@@ -4493,10 +4493,7 @@ datasets: []
         assert!(!is_valid_finding_id("relay config"));
     }
 
-    fn release_claim(
-        source_field: Option<&str>,
-        expression: Option<&str>,
-    ) -> ReleaseClaimConfig {
+    fn release_claim(source_field: Option<&str>, expression: Option<&str>) -> ReleaseClaimConfig {
         ReleaseClaimConfig {
             name: "given_name".to_string(),
             source_field: source_field.map(str::to_string),

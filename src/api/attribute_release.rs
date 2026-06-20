@@ -31,8 +31,8 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::api::governed::{
-    attach_pdp_audit, require_governed_read_access, GovernedAccessError, GovernedRedactionProjection,
-    GovernedRequestInfo,
+    attach_pdp_audit, require_governed_read_access, GovernedAccessError,
+    GovernedRedactionProjection, GovernedRequestInfo,
 };
 use crate::attribute_release::{evaluate_release_predicate, evaluate_release_scalar};
 use crate::audit::AuditContextExt;
@@ -431,7 +431,9 @@ fn resolve_requested_claims<'a>(
         return Ok(route.profile.claims.iter().collect());
     };
     if names.is_empty() {
-        return Err(ResolveRunError::from(Error::from(FilterError::InvalidValue)));
+        return Err(ResolveRunError::from(Error::from(
+            FilterError::InvalidValue,
+        )));
     }
     let mut resolved = Vec::with_capacity(names.len());
     for name in names {
@@ -545,19 +547,19 @@ async fn discovery(deps: RouteDeps) -> Response {
 /// (authenticated-only). Never leaks private source internals (table ids,
 /// source field names, paths, secrets, or policy internals).
 fn discovery_profile(profile: &AttributeReleaseProfile) -> Value {
-    let claim_names: Vec<&str> = profile.claims.iter().map(|claim| claim.name.as_str()).collect();
+    let claim_names: Vec<&str> = profile
+        .claims
+        .iter()
+        .map(|claim| claim.name.as_str())
+        .collect();
     let required_claims: Vec<&str> = profile
         .claims
         .iter()
         .filter(|claim| claim.required)
         .map(|claim| claim.name.as_str())
         .collect();
-    let accepted_subject_id_types: Vec<&str> = profile
-        .subject
-        .id_type
-        .as_deref()
-        .into_iter()
-        .collect();
+    let accepted_subject_id_types: Vec<&str> =
+        profile.subject.id_type.as_deref().into_iter().collect();
     json!({
         "id": profile.id,
         "version": profile.version,
@@ -591,11 +593,7 @@ impl RouteState {
     /// Resolve a profile by its globally-unique `(profile_id, version)` pair and
     /// bind it to its backing entity. An unknown pair is `ProfileNotFound`
     /// (generic 404). Missing runtime state is a generic unknown-resource error.
-    fn resolve(
-        runtime: &RuntimeSnapshot,
-        profile_id: &str,
-        version: &str,
-    ) -> Result<Self, Error> {
+    fn resolve(runtime: &RuntimeSnapshot, profile_id: &str, version: &str) -> Result<Self, Error> {
         let config = runtime.config().ok_or(SchemaError::UnknownResource)?;
         let (dataset_id, entity_config, profile) =
             find_profile(&config, profile_id, version).ok_or(ReleaseError::ProfileNotFound)?;
@@ -651,9 +649,16 @@ fn find_profile<'a>(
 /// from the released claim set, so no unconfigured field can ever be emitted.
 fn profile_source_fields(profile: &AttributeReleaseProfile, entity: &EntityModel) -> Vec<String> {
     let uses_cel = profile.release_conditions.is_some()
-        || profile.claims.iter().any(|claim| claim.expression.is_some());
+        || profile
+            .claims
+            .iter()
+            .any(|claim| claim.expression.is_some());
     if uses_cel {
-        return entity.fields.iter().map(|field| field.name.clone()).collect();
+        return entity
+            .fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect();
     }
     let mut fields = BTreeSet::new();
     fields.insert(profile.subject.source_field.clone());

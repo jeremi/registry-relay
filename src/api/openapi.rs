@@ -1340,15 +1340,12 @@ fn spdci_configured(config: &Config) -> bool {
 }
 
 fn attribute_releases_configured(config: &Config) -> bool {
-    config
-        .datasets
-        .iter()
-        .any(|dataset| {
-            dataset
-                .entities
-                .iter()
-                .any(|entity| !entity.attribute_release_profiles.is_empty())
-        })
+    config.datasets.iter().any(|dataset| {
+        dataset
+            .entities
+            .iter()
+            .any(|entity| !entity.attribute_release_profiles.is_empty())
+    })
 }
 
 fn entity_tag_name(dataset_id: &str, entity_name: &str) -> String {
@@ -3611,7 +3608,12 @@ fn insert_attribute_release_paths(paths: &mut Map<String, Value>) {
             }
         }),
     );
-    tag(paths, "/v1/attribute-releases", "get", TAG_ATTRIBUTE_RELEASE);
+    tag(
+        paths,
+        "/v1/attribute-releases",
+        "get",
+        TAG_ATTRIBUTE_RELEASE,
+    );
 
     // POST /v1/attribute-releases/{profile_id}/versions/{version}/resolve
     paths.insert(
@@ -5362,7 +5364,9 @@ mod tests {
             "POST resolve must be absent when no profiles are configured"
         );
 
-        let schemas = doc["components"]["schemas"].as_object().expect("schemas object");
+        let schemas = doc["components"]["schemas"]
+            .as_object()
+            .expect("schemas object");
         assert!(
             !schemas.contains_key("AttributeReleaseProfileList"),
             "AttributeReleaseProfileList must be absent when no profiles are configured"
@@ -5396,10 +5400,12 @@ mod tests {
 
         // Path: GET /v1/attribute-releases
         let list_op = &doc["paths"]["/v1/attribute-releases"]["get"];
-        assert!(list_op.is_object(), "GET /v1/attribute-releases must be present");
+        assert!(
+            list_op.is_object(),
+            "GET /v1/attribute-releases must be present"
+        );
         assert_eq!(
-            list_op["operationId"],
-            "list_attribute_release_profiles",
+            list_op["operationId"], "list_attribute_release_profiles",
             "operationId must match contract"
         );
         assert_eq!(
@@ -5413,12 +5419,11 @@ mod tests {
         );
 
         // Path: POST .../resolve
-        let resolve_op = &doc["paths"]
-            ["/v1/attribute-releases/{profile_id}/versions/{version}/resolve"]["post"];
+        let resolve_op =
+            &doc["paths"]["/v1/attribute-releases/{profile_id}/versions/{version}/resolve"]["post"];
         assert!(resolve_op.is_object(), "POST resolve must be present");
         assert_eq!(
-            resolve_op["operationId"],
-            "resolve_attribute_release",
+            resolve_op["operationId"], "resolve_attribute_release",
             "operationId must match contract"
         );
         assert_eq!(
@@ -5435,13 +5440,27 @@ mod tests {
             "#/components/schemas/AttributeReleaseResolveResponse"
         );
         // Standard denial responses must be present
-        assert!(resolve_op["responses"]["400"].is_object(), "400 must be present");
-        assert!(resolve_op["responses"]["403"].is_object(), "403 must be present");
-        assert!(resolve_op["responses"]["404"].is_object(), "404 must be present");
-        assert!(resolve_op["responses"]["503"].is_object(), "503 must be present");
+        assert!(
+            resolve_op["responses"]["400"].is_object(),
+            "400 must be present"
+        );
+        assert!(
+            resolve_op["responses"]["403"].is_object(),
+            "403 must be present"
+        );
+        assert!(
+            resolve_op["responses"]["404"].is_object(),
+            "404 must be present"
+        );
+        assert!(
+            resolve_op["responses"]["503"].is_object(),
+            "503 must be present"
+        );
 
         // Schemas
-        let schemas = doc["components"]["schemas"].as_object().expect("schemas object");
+        let schemas = doc["components"]["schemas"]
+            .as_object()
+            .expect("schemas object");
         assert!(
             schemas.contains_key("AttributeReleaseProfileList"),
             "AttributeReleaseProfileList schema must be present"
@@ -5461,10 +5480,18 @@ mod tests {
 
         // Required fields on AttributeReleaseProfile schema
         let profile_required = &schemas["AttributeReleaseProfile"]["required"];
-        for field in ["profile_id", "version", "release_scope", "claim_names",
-                      "required_claims", "accepted_subject_id_types", "response_media_type"] {
+        for field in [
+            "profile_id",
+            "version",
+            "release_scope",
+            "claim_names",
+            "required_claims",
+            "accepted_subject_id_types",
+            "response_media_type",
+        ] {
             assert!(
-                profile_required.as_array()
+                profile_required
+                    .as_array()
                     .expect("required array")
                     .iter()
                     .any(|v| v == field),
@@ -5476,7 +5503,8 @@ mod tests {
         let response_required = &schemas["AttributeReleaseResolveResponse"]["required"];
         for field in ["profile_id", "profile_version", "claims", "source"] {
             assert!(
-                response_required.as_array()
+                response_required
+                    .as_array()
                     .expect("required array")
                     .iter()
                     .any(|v| v == field),

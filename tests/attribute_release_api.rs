@@ -228,7 +228,9 @@ async fn try_server_with_scopes_and_extra(
         &ctx,
         table_name(&dataset, &resource),
         ingest_ulid,
-        Arc::new(MemTable::try_new(Arc::clone(&schema), vec![vec![batch(&schema)]]).expect("memtable")),
+        Arc::new(
+            MemTable::try_new(Arc::clone(&schema), vec![vec![batch(&schema)]]).expect("memtable"),
+        ),
     )
     .expect("register");
     let mut snapshot = ReadinessSnapshot::default();
@@ -240,7 +242,10 @@ async fn try_server_with_scopes_and_extra(
         },
     );
     let (_tx, readiness) = watch::channel(snapshot);
-    let query = Arc::new(EntityQueryEngine::new(Arc::clone(&ctx), Arc::clone(&registry)));
+    let query = Arc::new(EntityQueryEngine::new(
+        Arc::clone(&ctx),
+        Arc::clone(&registry),
+    ));
     let app = attribute_release_router::<()>()
         .layer(Extension(principal(scopes)))
         .layer(Extension(readiness))
@@ -390,7 +395,10 @@ async fn resolve_zero_rows_collapses_to_subject_denied() {
 #[tokio::test]
 async fn resolve_multiple_rows_collapses_to_subject_denied() {
     let server = server().await;
-    let response = server.post(RESOLVE_PATH).json(&subject_body("NID-DUP")).await;
+    let response = server
+        .post(RESOLVE_PATH)
+        .json(&subject_body("NID-DUP"))
+        .await;
     response.assert_status(StatusCode::FORBIDDEN);
     assert_eq!(response.json::<Value>()["code"], "release.subject_denied");
 }
@@ -406,7 +414,10 @@ async fn resolve_collapsed_denials_are_byte_identical() {
         .post(RESOLVE_PATH)
         .json(&subject_body("NID-DEAD"))
         .await;
-    let ambiguous = server.post(RESOLVE_PATH).json(&subject_body("NID-DUP")).await;
+    let ambiguous = server
+        .post(RESOLVE_PATH)
+        .json(&subject_body("NID-DUP"))
+        .await;
 
     not_found.assert_status(StatusCode::FORBIDDEN);
     deceased.assert_status(StatusCode::FORBIDDEN);
@@ -541,10 +552,7 @@ async fn release_scope_alone_does_not_authorize_row_reads() {
 #[tokio::test]
 async fn resolve_rejects_non_json_content_type() {
     let server = server().await;
-    let response = server
-        .post(RESOLVE_PATH)
-        .text("subject=NID-1")
-        .await;
+    let response = server.post(RESOLVE_PATH).text("subject=NID-1").await;
     response.assert_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
@@ -608,7 +616,10 @@ async fn discovery_hides_profiles_without_release_scope() {
     let response = server.get("/v1/attribute-releases").await;
     response.assert_status(StatusCode::OK);
     let body: Value = response.json();
-    assert!(body["profiles"].as_array().expect("profiles array").is_empty());
+    assert!(body["profiles"]
+        .as_array()
+        .expect("profiles array")
+        .is_empty());
 }
 
 #[tokio::test]

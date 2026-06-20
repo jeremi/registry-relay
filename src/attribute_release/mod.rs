@@ -87,9 +87,9 @@ mod enabled {
         let value = evaluate_single_field(cel, record)?;
         match value.as_bool() {
             Some(b) => Ok(b),
-            None => Err(AttributeReleaseError::TypeMismatch(predicate_type_diagnostic(
-                &value,
-            ))),
+            None => Err(AttributeReleaseError::TypeMismatch(
+                predicate_type_diagnostic(&value),
+            )),
         }
     }
 
@@ -115,10 +115,7 @@ mod enabled {
     /// `record`, and read the single output field back. Shared by both the
     /// predicate and scalar entry points so the fail-closed handling is
     /// identical.
-    fn evaluate_single_field(
-        cel: &str,
-        record: &Value,
-    ) -> Result<Value, AttributeReleaseError> {
+    fn evaluate_single_field(cel: &str, record: &Value) -> Result<Value, AttributeReleaseError> {
         let runtime = MappingRuntime::new(RuntimeOptions::default());
         let mapping = compile(&runtime, cel)?;
 
