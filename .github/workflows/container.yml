@@ -111,7 +111,7 @@ jobs:
 
       - name: Checkout registry-relay
         if: steps.channel.outputs.build == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           path: registry-relay
           persist-credentials: false
@@ -159,7 +159,7 @@ jobs:
 
       - name: Checkout registry-platform
         if: steps.channel.outputs.build == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ env.REGISTRY_PLATFORM_REPOSITORY }}
           ref: ${{ env.REGISTRY_PLATFORM_REF }}
@@ -169,7 +169,7 @@ jobs:
 
       - name: Checkout registry-manifest
         if: steps.channel.outputs.build == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ env.REGISTRY_MANIFEST_REPOSITORY }}
           ref: ${{ env.REGISTRY_MANIFEST_REF }}
@@ -179,7 +179,7 @@ jobs:
 
       - name: Checkout crosswalk
         if: steps.channel.outputs.build == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ env.CROSSWALK_REPOSITORY }}
           ref: ${{ env.CROSSWALK_REF }}
@@ -288,7 +288,7 @@ jobs:
             --subject registry-relay-image
       - name: Upload image security evidence
         if: always() && steps.channel.outputs.build == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: registry-relay-image-security-evidence
           path: registry-relay/target/security/
@@ -302,7 +302,7 @@ jobs:
 
       - name: Install cosign
         if: steps.channel.outputs.publish == 'true'
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Push image
         if: steps.channel.outputs.publish == 'true'
