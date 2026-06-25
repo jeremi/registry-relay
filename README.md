@@ -2,12 +2,17 @@
 
 **Moved:** Active development has moved to the public monorepo:
 [`registrystack/registry-stack`](https://github.com/registrystack/registry-stack).
-This repository is kept for pre-monorepo history and release tags. Use the
-monorepo for new issues, pull requests, and releases.
 
-Monorepo paths: `crates/registry-relay/` and `products/relay/`.
+This repository is retained for pre-monorepo history and release tags. File new
+issues and pull requests in the monorepo.
 
-> **Experimental:** This codebase is under active development. Its APIs are evolving quickly and may be unstable.
+Current source at monorepo ref `ab5a1d46df8715539f15d398804611e8ca9c52d9`:
+
+- [`crates/registry-relay/`](https://github.com/registrystack/registry-stack/tree/ab5a1d46df8715539f15d398804611e8ca9c52d9/crates/registry-relay)
+- [`products/relay/`](https://github.com/registrystack/registry-stack/tree/ab5a1d46df8715539f15d398804611e8ca9c52d9/products/relay)
+
+**Legacy status:** Pre-monorepo releases were experimental pre-1.0 evaluation
+builds. Current API evolution happens in the monorepo.
 
 Release label: pre-1.0 technical release for evaluation and integration pilots.
 
