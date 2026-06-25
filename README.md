@@ -1,5 +1,12 @@
 # Registry Relay
 
+> **Moved:** Active development has moved to the public monorepo:
+> [`registrystack/registry-stack`](https://github.com/registrystack/registry-stack).
+> This repository is kept for pre-monorepo history and release tags. Use the
+> monorepo for new issues, pull requests, and releases.
+>
+> Monorepo paths: `crates/registry-relay/` and `products/relay/`.
+
 > **Experimental:** This codebase is under active development. Its APIs are evolving quickly and may be unstable.
 
 Release label: pre-1.0 technical release for evaluation and integration pilots.
